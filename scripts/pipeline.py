@@ -127,11 +127,28 @@ def validate_pdf(path, meta):
     # Match the opening, never a DOI found only in the references.
     front = norm(texts[0] + texts[1][:1500])
     title_ok = norm(meta['title']) in front
-    doi_ok = norm(meta['doi']) in front
+    doi_tokens={d.rstrip('.,;:)]}').lower() for d in re.findall(r'10\.\d{4,9}/[^\s<>"\u201c\u201d]+',texts[0]+'\n'+texts[1][:1500],re.I)}
+    doi_ok = meta['doi'].lower() in doi_tokens
     author_ok = bool(meta['authors']) and norm(meta['authors'][0]) in front
     result.update(title_match=title_ok, doi_match=doi_ok, first_author_match=author_ok)
+    opening_dois={d.rstrip('.,;:)]}').lower() for d in re.findall(r'10\.\d{4,9}/[^\s<>"\u201c\u201d]+',texts[0],re.I)}
+    if opening_dois and not doi_ok:
+        return {**result,'status':'needs_review','reason':'opening_doi_conflicts',
+                'opening_dois':sorted(opening_dois)}
     page_range = re.fullmatch(r'(\d+)\s*[-–]\s*(\d+)', meta.get('page_range', ''))
     if page_range and len(texts) < int(page_range[2]) - int(page_range[1]) + 1:
+        review=meta.get('reviewed_author_version',{})
+        # This is a hash-bound, explicit review outcome, never an automatic
+        # inference that a short file must be a complete author manuscript.
+        if (review.get('user_approved') is True and review.get('sha256')==result['sha256']
+                and review.get('pages')==len(texts) and review.get('review_notes')
+                and review.get('pagination_checked') is True
+                and review.get('ending_checked') is True
+                and title_ok and author_ok
+                and all(norm(a) in front for a in meta['authors'])):
+            return {**result,'status':'probably_correct','version':'author_manuscript',
+                    'warning':'User-approved, hash-bound reviewed author version; not publisher typeset version',
+                    'version_review':review}
         return {**result, 'reason': 'fewer_pages_than_published_range'}
     if title_ok and author_ok:
         return {**result, 'status': 'verified' if doi_ok else 'probably_correct',
@@ -235,6 +252,7 @@ class Batch:
                 self.save(job)
                 return job
             job['key'] = key
+            job.pop('metadata_write_pending',None)
             attachments = managed_pdfs(key, meta)
             if good(attachments):
                 job.update(status='complete', attachments=attachments)
@@ -242,8 +260,11 @@ class Batch:
                 self.event(job, 'verified_existing')
                 return job
         else:
+            if job.get('metadata_write_pending'):
+                raise RuntimeError('Earlier metadata write unresolved; reconcile before another saveItems')
             selected_collection(self.collection)
             job.update(session=str(uuid.uuid4()), connector_id=str(uuid.uuid4()), status='importing_metadata')
+            job['metadata_write_pending']=True
             self.save(job)
             api('/connector/saveItems', dict(sessionID=job['session'], uri=meta['url'], items=[dict(
                 id=job['connector_id'], itemType='journalArticle', title=meta['title'], DOI=doi,
@@ -253,6 +274,7 @@ class Batch:
             if len(matches) != 1:
                 raise RuntimeError('Imported item identity not unique')
             job['key'] = next(iter(matches))
+            job.pop('metadata_write_pending',None)
             selected_collection(self.collection)
             self.save(job)
         if metadata_only:

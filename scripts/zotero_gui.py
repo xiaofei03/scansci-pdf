@@ -17,18 +17,31 @@ from pathlib import Path
 
 from pipeline import Batch, doi_normalize, managed_pdfs, good, validate_pdf
 
+ACTIVE_STREAMS={}
+
+
+def close_stream(report):
+    owned=ACTIVE_STREAMS.pop(report,None)
+    if owned:
+        server,worker=owned
+        server.shutdown();server.server_close();worker.join()
+
 
 def close_own_window(run_id):
     script = '''on run argv
+tell application "Zotero" to activate
+delay 0.7
 tell application "System Events" to tell process "Zotero"
 if name of front window does not contain "JavaScript" then return "not_front"
 set allElements to entire contents of front window
 repeat with e in allElements
 try
-if role of e is "AXTextArea" and value of e contains (item 1 of argv) then
-tell application "Zotero" to activate
-delay 0.3
-keystroke "w" using command down
+set contentValue to value of e as text
+if contentValue contains (item 1 of argv) then
+set targetName to name of front window
+click (first button of front window whose subrole is "AXCloseButton")
+delay 0.5
+if exists window targetName then return "close_not_confirmed"
 return "closed_own_window"
 end if
 end try
@@ -39,7 +52,7 @@ end run'''
     return subprocess.run(['osascript', '-e', script, run_id], capture_output=True, text=True, timeout=15).stdout.strip()
 
 
-def execute(batch, action, jobs, wait_seconds=50):
+def execute(batch, action, jobs, wait_seconds=600):
     if action != 'attach':
         return _execute(batch, action, jobs, wait_seconds)
     # Serve only prevalidated bytes on unpredictable loopback URLs, never a directory
@@ -70,12 +83,18 @@ def execute(batch, action, jobs, wait_seconds=50):
     worker.start()
     streams = {key: 'http://127.0.0.1:' + str(server.server_port) + path
                for path, (key, data) in payloads.items()}
+    retained=False
     try:
-        return _execute(batch, action, jobs, wait_seconds, streams)
+        result=_execute(batch, action, jobs, wait_seconds, streams)
+        if result.get('status')=='pending':
+            ACTIVE_STREAMS[result['report']]=(server,worker)
+            retained=True
+        return result
     finally:
-        server.shutdown()
-        server.server_close()
-        worker.join()
+        if not retained:
+            server.shutdown()
+            server.server_close()
+            worker.join()
 
 
 def _execute(batch, action, jobs, wait_seconds=50, streams=None):
@@ -87,13 +106,17 @@ def _execute(batch, action, jobs, wait_seconds=50, streams=None):
             check = validate_pdf(Path(job['pdf']), meta)
             if check['status'] not in ('verified', 'probably_correct'):
                 raise RuntimeError('Refusing unverified PDF attachment')
-            if good(managed_pdfs(job['key'], meta)):
+            checks=managed_pdfs(job['key'], meta)
+            if good(checks):
+                job.update(status='complete',attachments=checks)
+                batch.save(job)
                 continue
             entry['stream_url'] = streams[job['key']]
             entry['source_url'] = job.get('source_url') or meta['url']
+            entry['attachment_title'] = 'Author Manuscript (reviewed version)' if check.get('version')=='author_manuscript' else 'Full Text PDF'
         entries.append(entry)
     if not entries:
-        return dict(status='nothing_to_do', rows=[])
+        return dict(status='complete', rows=[],already_managed=True)
     # Never overwrite an existing script window, possibly containing the user's work.
     windows = subprocess.run(['osascript', '-e',
         'tell application "System Events" to tell process "Zotero" to get name of every window'],
@@ -119,8 +142,14 @@ def _execute(batch, action, jobs, wait_seconds=50, streams=None):
         batch.save(job)
     launcher = '''on run argv
 tell application "Zotero" to activate
-delay 0.3
+delay 1
 tell application "System Events" to tell process "Zotero"
+if not (exists menu "工具" of menu bar 1) then
+if exists menu item "文献库" of menu "窗口" of menu bar 1 then
+click menu item "文献库" of menu "窗口" of menu bar 1
+delay 1
+end if
+end if
 click menu item "Run JavaScript" of menu "开发者" of menu item "开发者" of menu "工具" of menu bar 1
 end tell
 delay 1
@@ -168,6 +197,8 @@ def reconcile(batch, jobs, result):
         job['gui_launch_status'] = result['status']
         batch.save(job)
     batch.report()
+    if result.get('action')=='attach' and any(j.get('status')!='complete' for j in jobs):
+        return {**result,'status':'attachment_needs_review'}
     return result
 
 

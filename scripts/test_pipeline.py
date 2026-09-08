@@ -9,7 +9,7 @@ from reportlab.pdfgen import canvas
 
 import pipeline
 from ablesci import AbleSci, guard
-from zotero_gui import execute
+from zotero_gui import execute, close_stream
 from batch import finish_ablesci, run
 
 
@@ -43,12 +43,34 @@ class Tests(unittest.TestCase):
     def test_wrong_author(self):
         self.assertEqual(pipeline.validate_pdf(self.pdf('author.pdf', author='Jones'), self.meta)['status'], 'needs_review')
 
+    def test_conflicting_doi_is_not_probably_correct(self):
+        result=pipeline.validate_pdf(self.pdf('conflict.pdf',doi='10.9876/different'),self.meta)
+        self.assertEqual(result['status'],'needs_review')
+        self.assertEqual(result['reason'],'opening_doi_conflicts')
+
+    def test_doi_prefix_is_not_exact_match(self):
+        result=pipeline.validate_pdf(self.pdf('prefix.pdf',doi=self.meta['doi']+'2'),self.meta)
+        self.assertEqual(result['reason'],'opening_doi_conflicts')
+
     def test_one_page(self):
         self.assertEqual(pipeline.validate_pdf(self.pdf('one.pdf', pages=1), self.meta)['status'], 'rejected')
 
     def test_known_page_range(self):
         m = dict(self.meta, page_range='20-25')
         self.assertEqual(pipeline.validate_pdf(self.pdf('short.pdf'), m)['reason'], 'fewer_pages_than_published_range')
+
+    def test_author_version_requires_specific_hash_and_review(self):
+        path=self.pdf('reviewed-author.pdf')
+        m=dict(self.meta,page_range='20-25')
+        check=pipeline.validate_pdf(path,m)
+        review={'user_approved':True,'sha256':check['sha256'],'pages':2,
+                'pagination_checked':True,'ending_checked':True,'review_notes':'Inspected version-specific pagination and ending.'}
+        m['reviewed_author_version']=review
+        self.assertEqual(pipeline.validate_pdf(path,m)['version'],'author_manuscript')
+        review['sha256']='different'
+        self.assertEqual(pipeline.validate_pdf(path,m)['status'],'rejected')
+        review['sha256']=check['sha256'];review['user_approved']=False
+        self.assertEqual(pipeline.validate_pdf(path,m)['status'],'rejected')
 
     def test_html(self):
         path = self.root / 'login.pdf'
@@ -120,6 +142,40 @@ class Tests(unittest.TestCase):
         with patch('zotero_gui._execute', side_effect=inspect):
             self.assertEqual(execute(None, 'attach', [job])['status'], 'tested')
 
+    def test_pending_attachment_stream_stays_alive(self):
+        import urllib.request
+        job=dict(key='TEST',pdf=str(self.pdf('pending-stream.pdf')),metadata=self.meta)
+        saved={}
+        def pending(batch,action,jobs,wait,streams):
+            saved['url']=streams['TEST']
+            return {'status':'pending','report':'test-owned-report'}
+        try:
+            with patch('zotero_gui._execute',side_effect=pending):
+                self.assertEqual(execute(None,'attach',[job])['status'],'pending')
+            self.assertEqual(urllib.request.urlopen(saved['url'],timeout=2).read()[:5],b'%PDF-')
+        finally:close_stream('test-owned-report')
+        with self.assertRaises(Exception):urllib.request.urlopen(saved['url'],timeout=2)
+
+    def test_uncertain_metadata_is_not_reposted(self):
+        b=pipeline.Batch(self.root,'TEST',self.root/'prefs.js')
+        doi='10.1234/uncertain'
+        meta=dict(self.meta,doi=doi,creators=[],year='2020',journal='Journal',url='https://example.org/paper')
+        b.save({'doi':doi,'metadata':meta,'status':'new'})
+        with patch('pipeline.existing',return_value={}), \
+             patch('pipeline.selected_collection',return_value={}), \
+             patch('pipeline.api',side_effect=TimeoutError) as write:
+            with self.assertRaises(TimeoutError):b.run_one(doi,metadata_only=True)
+            with self.assertRaisesRegex(RuntimeError,'unresolved'):b.run_one(doi,metadata_only=True)
+            self.assertEqual(write.call_count,1)
+
+    def test_completed_batch_does_not_require_browser(self):
+        b=pipeline.Batch(self.root,'TEST',self.root/'prefs.js')
+        doi='10.1234/alldone'
+        b.save({'doi':doi,'status':'complete','metadata':self.meta,'source':'zotero_oa'})
+        with patch('batch.transfer_state',side_effect=AssertionError('must not open browser')):
+            result=finish_ablesci(b,[doi],self.root,50,300,accept=True)
+        self.assertEqual(next(j for j in result if j['doi']==doi)['status'],'complete')
+
     def test_resume_missing_skips_repeated_lookup(self):
         b = pipeline.Batch(self.root, 'TEST', self.root / 'prefs.js')
         b.save(dict(doi='10.1234/resume', status='needs_ablesci', metadata=self.meta))
@@ -131,7 +187,8 @@ class Tests(unittest.TestCase):
     def test_orchestrator_budget_gate(self):
         b = pipeline.Batch(self.root, 'TEST', self.root / 'prefs.js')
         b.save(dict(doi='10.1234/budget', status='needs_ablesci', metadata=self.meta))
-        with patch('ablesci.snapshot', side_effect=AssertionError('must not open browser')):
+        with patch('ablesci.snapshot', side_effect=AssertionError('must not open browser')), \
+             patch('batch.transfer_state',return_value={'url':'https://www.ablesci.com/my/assist-my'}):
             finish_ablesci(b, ['10.1234/budget'], self.root)
 
     def test_download_resume_no_browser(self):

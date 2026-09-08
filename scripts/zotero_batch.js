@@ -42,7 +42,7 @@ try {
                     throw Error('Attachment requires a scoped loopback stream');
                 }
                 const a = await Zotero.Attachments.importFromURL({url: entry.stream_url,
-                    parentItemID: item.id, contentType: 'application/pdf', title: 'Full Text PDF'});
+                    parentItemID: item.id, contentType: 'application/pdf', title: entry.attachment_title || 'Full Text PDF'});
                 a.setField('url', entry.source_url);
                 await a.saveTx();
                 row.status = 'attached_needs_validation';

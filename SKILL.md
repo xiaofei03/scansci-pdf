@@ -20,6 +20,8 @@ state, collection, MCP server, or installed Python environment.
 4. Run `scripts/batch.py` once for the batch:
    **Zotero full lookup → OA/publisher fallback → AbleSci → validation → managed PDF**.
    Reuse the same work directory to resume and preserve the cumulative point ledger.
+   For an explicitly requested unattended batch, use `--until-complete` and a
+   suitable `--max-run-seconds`; observe the live process, not repeated fresh runs.
 5. Return completed, waiting and needs-review counts. Only a real validated
    Zotero-managed attachment counts as success, not a metadata-only item.
 
@@ -30,6 +32,13 @@ state, collection, MCP server, or installed Python environment.
 - New AbleSci requests require explicit per-paper and cumulative batch budgets.
   Defaults authorize no spending; default actual reward is 10 points, distinct
   from the maximum. Do not infer permission to increase rewards.
+- Prefer the site's high-speed download by default once batch point caps are
+  authorized. Its currently supported 2-point fee counts inside both caps; never
+  silently accept a changed price. `--no-fast-download` chooses free routes.
+- User-approved `--approved-accept-verified` permits acceptance only after exact
+  PDF validation. It is needed for unattended continuation when the website blocks
+  new requests until earlier uploaded files are handled. Do not accept unverified
+  files or interact with requests outside the current batch.
 - CAPTCHA, login, second-factor prompts, unclear PDF identity, existing closed
   requests, ambiguous duplicates and unresolved writes require review.
 - Only lawful OA/authorized sources; no access-control bypass or cookie export.
@@ -40,8 +49,13 @@ state, collection, MCP server, or installed Python environment.
   were tested with Chinese Zotero; other locales may need explicit adaptation.
 - Existing native file-copy stalls are avoided with a scoped temporary loopback PDF
   stream. Never install a generic unauthenticated privileged JS bridge.
-- Reusable runner does not automatically accept/reject AbleSci uploads. Human
-  response time prevents a universal five-minute guarantee.
+- Without acceptance authorization, pause at that gate; never auto-reject uploads.
+  Chrome's blocked/multiple-download permission also requires user action. A
+  completed web transfer with no local file is not success and must not be re-billed.
+  Human response time and network throughput prevent a universal five-minute guarantee.
+- A slow active transfer is progress, not failure. Do not navigate from its page.
+  Read [references/ablesci-state-machine.md](references/ablesci-state-machine.md)
+  when diagnosing transfer, browser-dialog, budget or acceptance exceptions.
 
 ## Optional external tools
 

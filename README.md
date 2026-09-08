@@ -27,14 +27,18 @@ python3 scripts/doctor.py
 > 下载这份 DOI 清单，导入 Zotero 的「我的研究」分类。允许科研通每篇最多 50 积分，本批最多 300 积分。
 
 注意：50/300 是授权上限的示例，默认悬赏仍是每篇 10 积分，不自动提高。
-登录、验证码、权限、存疑 PDF、人工应助等待仍可能需要介入。不会自动持续监控，
-也不自动采纳/驳回科研通文件，不能保证所有文献在五分钟内获取。
+预算已授权时默认优先高速下载，当前支持的每文件 2 积分费用也计入 50/300 上限；
+可用 `--no-fast-download` 只走普通线路。高速节点失败会尝试网页提供的普通线路。
+用户授权验证后采纳时，追加 `--approved-accept-verified`；不自动驳回文件。
+`--until-complete --max-run-seconds 3600` 在同一进程中持续续查和完成批次，不另建
+后台定时任务。下载传输中不会切页；慢速有进展就等待，失败才限次换线路。
+登录、验证码、权限、存疑 PDF 仍需要介入；人工应助和网络速度不能保证五分钟。
 
 ## 验证与隐私
 
 ```sh
 python3 -m pip install -r requirements-dev.txt
-python3 -m unittest discover -s scripts -p test_pipeline.py
+python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
 
 测试 PDF 为本地生成的虚构样本；测试不发真实求助、不扣积分。真实数据请保存在
