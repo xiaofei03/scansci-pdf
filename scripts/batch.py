@@ -9,6 +9,7 @@ from pathlib import Path
 from pipeline import Batch, doi_normalize
 from zotero_gui import execute, reconcile, close_own_window, close_stream
 from ablesci import AbleSci, navigate, transfer_state
+from doctor import download_preflight
 
 
 def requested_complete(results, dois, accept=False):
@@ -21,6 +22,12 @@ def requested_complete(results, dois, accept=False):
 
 def attachment_complete(adapter, doi):
     return adapter.job(doi).get('status')=='complete'
+
+
+def completion_exit_code(results, dois, accept=False, needs_review=False):
+    if requested_complete(results, dois, accept):
+        return 0
+    return 2 if needs_review else 3
 
 
 def resume_gui(b, dois):
@@ -219,6 +226,8 @@ def main():
     p.add_argument('--test-force-gui-attach', action='store_true')
     p.add_argument('--ablesci', action='store_true')
     p.add_argument('--downloads-dir')
+    p.add_argument('--chrome-preferences', help='Preferences file of the Chrome profile owning the AbleSci tab; read-only')
+    p.add_argument('--preflight-only', action='store_true', help='Check download setup without library/browser writes or spending')
     p.add_argument('--approved-per-paper-points', type=int, default=0)
     p.add_argument('--approved-total-points', type=int, default=0)
     p.add_argument('--ablesci-wait-seconds', type=int, default=45)
@@ -239,6 +248,11 @@ def main():
         p.error('The full desktop pipeline currently requires macOS; no library writes were attempted')
     if args.ablesci and not args.downloads_dir:
         p.error('--ablesci requires explicit --downloads-dir')
+    if args.ablesci or args.preflight_only:
+        readiness = download_preflight(args.chrome_preferences, args.downloads_dir)
+        if args.preflight_only or not readiness['ready']:
+            print(json.dumps({'stage':'download_preflight', **readiness}, ensure_ascii=False))
+            return 0 if readiness['ready'] else 2
     dois = list(args.doi)
     if args.doi_file:
         dois += [x.strip() for x in Path(args.doi_file).read_text(encoding='utf-8').splitlines()
@@ -266,7 +280,8 @@ def main():
             results=finish_ablesci(b,dois,args.downloads_dir,args.approved_per_paper_points,args.approved_total_points,
                                   args.ablesci_wait_seconds,args.download_wait_seconds,args.approved_fast_download,args.approved_accept_verified,paper_budgets,args.approved_site_minimum)
     print(json.dumps([{'doi': j['doi'], 'status': j['status']} for j in results], ensure_ascii=False))
+    return completion_exit_code(results, dois, args.approved_accept_verified, getattr(b, 'needs_review', False))
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

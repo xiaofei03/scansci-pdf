@@ -5,8 +5,49 @@ import importlib.util
 import json
 import platform
 import shutil
+import os
 import urllib.request
 from pathlib import Path
+
+
+def download_preflight(preferences, downloads_dir):
+    """Conservative, read-only check of an explicitly selected Chrome profile.
+
+    Never infer the active profile from last-used state; never modify permissions.
+    Disk preferences are a prerequisite, not proof against policy/runtime overrides.
+    """
+    issues = []
+    root = Path(downloads_dir).expanduser().resolve() if downloads_dir else None
+    if not root or not root.is_dir() or not os.access(root, os.W_OK):
+        issues.append('download_directory_missing_or_not_writable')
+    if not preferences:
+        issues.append('explicit_chrome_preferences_required')
+        return {'ready': False, 'issues': issues}
+    try:
+        data = json.loads(Path(preferences).expanduser().read_text(encoding='utf-8'))
+        download = data.get('download', {})
+        exceptions = data.get('profile', {}).get('content_settings', {}).get('exceptions', {}).get('automatic_downloads', {})
+        if not isinstance(download, dict) or not isinstance(exceptions, dict):
+            raise ValueError('unsupported preferences')
+        # Require a permanent allow for this exact site, not a global relaxation.
+        allowed = False
+        for origin in ('https://www.ablesci.com,*', 'https://www.ablesci.com:443,*'):
+            entry = exceptions.get(origin, {})
+            if not isinstance(entry, dict):
+                continue
+            if entry.get('setting') == 1 and str(entry.get('expiration', '0')) == '0':
+                allowed = True
+        if not allowed:
+            issues.append('ablesci_multiple_downloads_not_explicitly_allowed')
+        if download.get('prompt_for_download', False):
+            issues.append('save_as_prompt_enabled')
+        configured = Path(download.get('default_directory') or (Path.home() / 'Downloads')).expanduser().resolve()
+        if root and configured != root:
+            issues.append('chrome_download_directory_mismatch')
+    except (OSError, ValueError, TypeError, AttributeError):
+        issues.append('chrome_preferences_unreadable_or_unsupported')
+    return {'ready': not issues, 'issues': issues,
+            'note': 'Read-only disk check; selected profile must match the AbleSci tab. Runtime/policy overrides remain possible.'}
 
 
 def probe(route):
@@ -40,5 +81,10 @@ def inspect(prefs=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--prefs')
+    parser.add_argument('--chrome-preferences')
+    parser.add_argument('--downloads-dir')
     args = parser.parse_args()
-    print(json.dumps(inspect(args.prefs), ensure_ascii=False, indent=2))
+    result = inspect(args.prefs)
+    if args.chrome_preferences or args.downloads_dir:
+        result['download_preflight'] = download_preflight(args.chrome_preferences, args.downloads_dir)
+    print(json.dumps(result, ensure_ascii=False, indent=2))

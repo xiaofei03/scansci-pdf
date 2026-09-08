@@ -9,6 +9,17 @@ Use the included scripts, not code stored in a manuscript project. Resolve all p
 relative to this SKILL.md. Do not assume another computer has the same paths, login
 state, collection, MCP server, or installed Python environment.
 
+## Script-only operating contract
+
+For routine batches, use the packaged CLI and its machine-readable results. Do not
+fall back to CUA, screenshots, ad-hoc AppleScript clicks or per-paper model-guided
+browser manipulation. Known exceptions belong in tested reusable scripts. A blocked
+result means checkpoint and ask for the exact setup/authority needed, not GUI rescue.
+The current CLI still automates Chrome and Zotero through Apple Events; it is not
+a headless API-only implementation. Do not claim zero failures or universal unattended
+completion. One-time permissions, login and ambiguous manuscript versions can require
+user action. Do not weaken identity checks or change security settings to meet a timer.
+
 ## Fast route
 
 1. Read [references/local-batch-pipeline.md](references/local-batch-pipeline.md).
@@ -22,6 +33,9 @@ state, collection, MCP server, or installed Python environment.
    Reuse the same work directory to resume and preserve the cumulative point ledger.
    For an explicitly requested unattended batch, use `--until-complete` and a
    suitable `--max-run-seconds`; observe the live process, not repeated fresh runs.
+   AbleSci requires an explicit `--chrome-preferences` path for its logged-in profile.
+   The automatic preflight stops before writes/spending if download permission or
+   save location is unready. Use `--preflight-only` to check setup without running.
 5. Return completed, waiting and needs-review counts. Only a real validated
    Zotero-managed attachment counts as success, not a metadata-only item.
 

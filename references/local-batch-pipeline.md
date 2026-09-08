@@ -36,6 +36,7 @@ macOS 自动化/辅助功能权限；桌面应保持解锁。
 
 ```sh
 --ablesci --downloads-dir '/absolute/browser/download/directory' \
+--chrome-preferences '/absolute/Chrome/profile/Preferences' \
 --approved-per-paper-points 50 --approved-total-points 300
 ```
 
@@ -45,6 +46,18 @@ macOS 自动化/辅助功能权限；桌面应保持解锁。
 ```sh
 --approved-accept-verified --until-complete --max-run-seconds 3600
 ```
+
+`--chrome-preferences` 必须对应科研通标签所在的 Chrome 个人资料；有多个 profile
+时不得猜测。首次设置时用户可从 Chrome 的版本页确认 Profile Path，再指定其中的
+Preferences 文件。脚本只读检查该站点的多文件下载许可、是否弹出另存为和下载目录，
+不修改配置，不读取 Cookie，不输出其他网站设置。未准备好返回 JSON 和退出码 2，
+发生在 Zotero 写入或科研通扣费之前；加 `--preflight-only` 可只做这个检查。
+Chrome 配置文件可能尚未刷新到磁盘，策略也可能覆盖设置，因此通过检查并不保证
+所有运行时权限。请先手动完成一次站点许可并确认配置已保存，再测试新批次。
+常规批量禁止临时调用 CUA/截图点选救场；明确返回阻塞原因，保留账本后原目录续跑。
+脚本仍有桌面依赖，不等于无浏览器、无窗口的纯 API 运行。
+批次退出码：0 = 全部完成（或 preflight-only 检查通过），2 = 配置/人工复核阻塞，
+3 = 未完成但可续查，1 = 未捕获运行错误。不要把进程退出或单元测试通过当作下载成功。
 
 这会在同一个受锁保护的进程内续查，不创建定时任务。下载阶段默认可等待 900 秒
 （`--download-wait-seconds`），有传输进展不切页，明确失败才限次换普通线路。
