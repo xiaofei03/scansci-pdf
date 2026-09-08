@@ -54,7 +54,10 @@ def run(b, dois, test_skip_find=False, test_force_gui_attach=False):
             else:
                 jobs.append(b.run_one(doi, metadata_only=True))
         except Exception as e:
-            failed=prior if prior else {'doi':doi}
+            # The attempted operation may already have persisted its uncertainty
+            # marker/session. Never replace that newer checkpoint with stale prior.
+            latest=b.db.execute('SELECT data FROM jobs WHERE doi=?',(doi,)).fetchone()
+            failed=json.loads(latest[0]) if latest else (prior if prior else {'doi':doi})
             failed.update(status='metadata_error',error_type=type(e).__name__)
             b.save(failed)
             b.event({'doi': doi}, 'metadata_error', error=type(e).__name__)

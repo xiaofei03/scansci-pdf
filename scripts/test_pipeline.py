@@ -176,6 +176,19 @@ class Tests(unittest.TestCase):
             result=finish_ablesci(b,[doi],self.root,50,300,accept=True)
         self.assertEqual(next(j for j in result if j['doi']==doi)['status'],'complete')
 
+    def test_orchestrator_preserves_uncertain_metadata_checkpoint(self):
+        b=pipeline.Batch(self.root,'TEST',self.root/'prefs.js')
+        doi='10.1234/uncertain-orchestrator'
+        meta=dict(self.meta,doi=doi,creators=[],year='2020',journal='Journal',url='https://example.org/paper')
+        b.save({'doi':doi,'metadata':meta,'status':'new'})
+        with patch('pipeline.existing',return_value={}), \
+             patch('pipeline.selected_collection',return_value={}), \
+             patch('pipeline.api',side_effect=TimeoutError) as write:
+            run(b,[doi]);run(b,[doi])
+            self.assertEqual(write.call_count,1)
+        stored=json.loads(b.db.execute('SELECT data FROM jobs WHERE doi=?',(doi,)).fetchone()[0])
+        self.assertTrue(stored['metadata_write_pending'])
+
     def test_resume_missing_skips_repeated_lookup(self):
         b = pipeline.Batch(self.root, 'TEST', self.root / 'prefs.js')
         b.save(dict(doi='10.1234/resume', status='needs_ablesci', metadata=self.meta))
