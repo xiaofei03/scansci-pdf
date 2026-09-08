@@ -33,9 +33,10 @@ user action. Do not weaken identity checks or change security settings to meet a
    Reuse the same work directory to resume and preserve the cumulative point ledger.
    For an explicitly requested unattended batch, use `--until-complete` and a
    suitable `--max-run-seconds`; observe the live process, not repeated fresh runs.
-   AbleSci requires an explicit `--chrome-preferences` path for its logged-in profile.
-   The automatic preflight stops before writes/spending if download permission or
-   save location is unready. Use `--preflight-only` to check setup without running.
+   Preflight checks the explicit writable `--downloads-dir`. Completed transfers
+   without a local file export the already delivered visible blob link automatically;
+   no native Save As/multiple-download permission is needed for that export.
+   Use `--preflight-only` to check setup without running.
 5. Return completed, waiting and needs-review counts. Only a real validated
    Zotero-managed attachment counts as success, not a metadata-only item.
 
@@ -64,8 +65,9 @@ user action. Do not weaken identity checks or change security settings to meet a
 - Existing native file-copy stalls are avoided with a scoped temporary loopback PDF
   stream. Never install a generic unauthenticated privileged JS bridge.
 - Without acceptance authorization, pause at that gate; never auto-reject uploads.
-  Chrome's blocked/multiple-download permission also requires user action. A
-  completed web transfer with no local file is not success and must not be re-billed.
+  If the completed page has no unique supported delivered blob link, checkpoint
+  for review; do not improvise clicks or security changes. A completed web transfer
+  with no validated local file is not success and must not be re-billed.
   Human response time and network throughput prevent a universal five-minute guarantee.
 - A slow active transfer is progress, not failure. Do not navigate from its page.
   Read [references/ablesci-state-machine.md](references/ablesci-state-machine.md)

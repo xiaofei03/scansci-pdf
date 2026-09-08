@@ -43,10 +43,14 @@ never the active download page. Do not infer uploader delay from a stale snapsho
 - Unknown dialogs, authentication gates, changed file identity and unresolved
   spending are review states, not permission to click through.
 - Chrome can block multiple downloads after the site has received 100% of a PDF.
-  Try the page's observed “手动保存文件” link once; if there is still no local file,
-  report “transfer complete, local save not located”; do not diagnose a blocked
-  download without a browser indicator. Ask the user to save or inspect permission. Don't
-  restart the transfer, alter broad browser security settings or accept the file.
+  Collect and validate existing local files first. Otherwise `save_received_blob.py`
+  exports the unique visible “手动保存文件” blob on the exact recorded completed page.
+  It fetches only already delivered same-site blob bytes, not a publisher/CDN URL;
+  a bounded owned temporary cache transfers them to a hash-named local PDF.
+  Validate identity before attachment/acceptance. No Save As, permission changes,
+  extra fee or transfer restart. A missing/ambiguous/non-blob link or invalid PDF
+  is a review state, not permission for GUI rescue. Pending PDF reviews are not
+  retried by exporting the same bytes again.
 
 ## Acceptance and budget
 

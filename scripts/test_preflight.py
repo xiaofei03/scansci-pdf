@@ -30,7 +30,9 @@ class DownloadPreflightTests(unittest.TestCase):
         self.assertTrue(self.check()['ready'])
 
     def test_no_profile_is_not_guessed(self):
-        self.assertIn('explicit_chrome_preferences_required', download_preflight(None, self.root)['issues'])
+        result = download_preflight(None, self.root)
+        self.assertTrue(result['ready'])
+        self.assertEqual(result['save_method'], 'delivered_blob_export')
 
     def test_global_allow_is_not_scoped_permission(self):
         self.data['profile']['content_settings'] = {'exceptions': {}, 'default_content_setting_values': {'automatic_downloads': 1}}
@@ -51,7 +53,7 @@ class DownloadPreflightTests(unittest.TestCase):
 
     def test_unready_cli_exits_before_creating_batch_or_writing(self):
         argv = ['batch.py', '--collection', 'TEST', '--work-dir', str(self.root),
-                '--prefs', str(self.root / 'prefs.js'), '--ablesci', '--downloads-dir', str(self.root)]
+                '--prefs', str(self.root / 'prefs.js'), '--ablesci', '--downloads-dir', str(self.root / 'missing')]
         with patch('sys.argv', argv), patch('sys.platform', 'darwin'), \
              patch('batch.Batch', side_effect=AssertionError('must not start library work')):
             self.assertEqual(main(), 2)

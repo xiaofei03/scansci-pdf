@@ -11,18 +11,17 @@ from pathlib import Path
 
 
 def download_preflight(preferences, downloads_dir):
-    """Conservative, read-only check of an explicitly selected Chrome profile.
+    """Check local export destination; optionally diagnose native browser saving.
 
-    Never infer the active profile from last-used state; never modify permissions.
-    Disk preferences are a prerequisite, not proof against policy/runtime overrides.
+    Delivered-blob export does not use Chrome's download permission or Save As.
+    An explicit profile opts into the older native-save diagnostic only.
     """
     issues = []
     root = Path(downloads_dir).expanduser().resolve() if downloads_dir else None
     if not root or not root.is_dir() or not os.access(root, os.W_OK):
         issues.append('download_directory_missing_or_not_writable')
     if not preferences:
-        issues.append('explicit_chrome_preferences_required')
-        return {'ready': False, 'issues': issues}
+        return {'ready': not issues, 'issues': issues, 'save_method': 'delivered_blob_export'}
     try:
         data = json.loads(Path(preferences).expanduser().read_text(encoding='utf-8'))
         download = data.get('download', {})

@@ -113,7 +113,7 @@ def _execute(batch, action, jobs, wait_seconds=50, streams=None):
                 continue
             entry['stream_url'] = streams[job['key']]
             entry['source_url'] = job.get('source_url') or meta['url']
-            entry['attachment_title'] = 'Author Manuscript (reviewed version)' if check.get('version')=='author_manuscript' else 'Full Text PDF'
+            entry['attachment_title'] = job.get('attachment_title') or ('Author Manuscript (reviewed version)' if check.get('version')=='author_manuscript' else 'Full Text PDF')
         entries.append(entry)
     if not entries:
         return dict(status='complete', rows=[],already_managed=True)

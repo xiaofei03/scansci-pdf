@@ -118,6 +118,7 @@ def transfer_state():
 
 class AbleSci:
     def __init__(self, directory):
+        self.root = Path(directory)
         self.db = sqlite3.connect(Path(directory) / 'jobs.sqlite')
         self.db.execute('''CREATE TABLE IF NOT EXISTS requests
             (doi TEXT PRIMARY KEY, status TEXT NOT NULL, points INTEGER NOT NULL,
@@ -434,22 +435,13 @@ class AbleSci:
                 percent=current['percent'];last_progress=time.monotonic()
             if current['complete']:
                 review=self.job(doi).get('download_review')
-                if not review and not job.get('manual_save_attempted'):
-                    job['manual_save_attempted']=True;self.save_job(job)
-                    try:
-                        chrome('''(()=>{const es=Array.from(document.querySelectorAll('a'))
-                          .filter(e=>e.getClientRects().length&&e.innerText.trim()==='手动保存文件');
-                          if(es.length!==1)throw Error('Manual save control not unique');
-                          es[0].click();return JSON.stringify({saved:true});})()''')
-                    except json.JSONDecodeError:
-                        # Saving can succeed while Chrome returns no JSON. Never
-                        # replay this click; reconcile the local PDF instead.
-                        pass
-                    time.sleep(2)
-                    found=self.collect_local(doi,downloads_dir)
-                    if found:return found
-                return dict(status='download_needs_review' if review else 'download_saved_not_located',
-                            review=review,action='Inspect saved file / browser blocked-download permission; do not restart transfer')
+                if review:
+                    return dict(status='download_needs_review', review=review,
+                                action='Review the saved PDF; do not restart transfer')
+                # Export only bytes already delivered to the visible save link.
+                # No native save dialog, download permission change or new charge.
+                from save_received_blob import save_received
+                return save_received(self.root, doi, downloads_dir)
             if time.monotonic()-last_report>30:
                 print(json.dumps({'doi':doi,'download_percent':percent,'active':current['active']},ensure_ascii=False),flush=True)
                 last_report=time.monotonic()
@@ -492,7 +484,7 @@ class AbleSci:
         if doi not in state['text'].lower() or norm(job['metadata']['title']) not in norm(state['text']):
             raise RuntimeError('Wrong acceptance identity')
         if '已采纳' in state['text'] and '已完结' in state['text']:
-            job['ablesci_accepted']=True;self.save_job(job);return dict(status='already_accepted')
+            job['ablesci_accepted']=True;job['acceptance_status']='confirmed';self.save_job(job);return dict(status='already_accepted')
         chrome('''(()=>{const es=Array.from(document.querySelectorAll('a,button')).filter(e=>e.getClientRects().length&&e.innerText.trim()==='确定');
           if(es.length===1&&document.body.innerText.includes('恭喜您，已经有人上传了文件'))es[0].click();
           const bs=Array.from(document.querySelectorAll('button')).filter(e=>e.getClientRects().length&&e.innerText.trim()==='采纳文件');
@@ -514,7 +506,7 @@ class AbleSci:
         state=snapshot()
         if '已采纳' not in state['text'] or '已完结' not in state['text']:
             raise RuntimeError('Acceptance pending; reconcile before retry')
-        job['ablesci_accepted']=True;self.save_job(job)
+        job['ablesci_accepted']=True;job['acceptance_status']='confirmed';self.save_job(job)
         return dict(status='accepted_verified')
 
 

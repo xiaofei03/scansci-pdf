@@ -226,7 +226,7 @@ def main():
     p.add_argument('--test-force-gui-attach', action='store_true')
     p.add_argument('--ablesci', action='store_true')
     p.add_argument('--downloads-dir')
-    p.add_argument('--chrome-preferences', help='Preferences file of the Chrome profile owning the AbleSci tab; read-only')
+    p.add_argument('--chrome-preferences', help='Optional strict native-browser-save diagnostic; omit for default delivered-blob export')
     p.add_argument('--preflight-only', action='store_true', help='Check download setup without library/browser writes or spending')
     p.add_argument('--approved-per-paper-points', type=int, default=0)
     p.add_argument('--approved-total-points', type=int, default=0)
