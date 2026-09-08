@@ -141,6 +141,16 @@ class DownloadStateTests(unittest.TestCase):
         self.assertTrue(requested_complete(jobs,[self.doi],accept=True))
         self.assertFalse(requested_complete(jobs,[self.doi,'10.1234/missing']))
 
+    def test_empty_save_response_checks_file_without_replaying_click(self):
+        state={'url':self.url,'active':False,'complete':True,'percent':None,'text':'下载已完成'}
+        with patch.object(self.a,'collect_local',side_effect=[None,None,{'status':'download_verified'}]), \
+             patch('ablesci.transfer_state',return_value=state), \
+             patch('ablesci.chrome',side_effect=json.JSONDecodeError('empty','',0)) as click, \
+             patch('ablesci.time.sleep'):
+            self.assertEqual(self.a.download(self.doi,self.root)['status'],'download_verified')
+        self.assertEqual(click.call_count,1)
+        self.assertTrue(self.a.job(self.doi)['manual_save_attempted'])
+
     def test_live_transfer_is_prioritized_over_waiting_request(self):
         other='10.1234/waiting'
         self.b.save({'doi':other,'status':'needs_ablesci','metadata':{}})

@@ -436,10 +436,15 @@ class AbleSci:
                 review=self.job(doi).get('download_review')
                 if not review and not job.get('manual_save_attempted'):
                     job['manual_save_attempted']=True;self.save_job(job)
-                    chrome('''(()=>{const es=Array.from(document.querySelectorAll('a'))
-                      .filter(e=>e.getClientRects().length&&e.innerText.trim()==='手动保存文件');
-                      if(es.length!==1)throw Error('Manual save control not unique');
-                      es[0].click();return JSON.stringify({saved:true});})()''')
+                    try:
+                        chrome('''(()=>{const es=Array.from(document.querySelectorAll('a'))
+                          .filter(e=>e.getClientRects().length&&e.innerText.trim()==='手动保存文件');
+                          if(es.length!==1)throw Error('Manual save control not unique');
+                          es[0].click();return JSON.stringify({saved:true});})()''')
+                    except json.JSONDecodeError:
+                        # Saving can succeed while Chrome returns no JSON. Never
+                        # replay this click; reconcile the local PDF instead.
+                        pass
                     time.sleep(2)
                     found=self.collect_local(doi,downloads_dir)
                     if found:return found
