@@ -26,6 +26,10 @@ Downloads directory to contain exactly one new PDF.
 - Prefer high-speed within authorized caps; reserve its cost before clicking and
   wait for the asynchronously displayed confirmation. A button click does not prove
   a file has arrived. A changed fee requires renewed authority.
+- A disabled high-speed button during initialization is not an attempted route.
+  Wait for readiness without reserving points or marking the route as tried.
+  Empty read-only snapshots may be retried briefly; never replay a write merely
+  because its response was empty.
 - A failed high-speed CDN is not proof the file is unavailable. Use the page's
   ordinary route buttons. No same-node infinite retries; persist tried routes.
 - Do not navigate while transferring. The browser's beforeunload warning prevents
@@ -37,7 +41,8 @@ Downloads directory to contain exactly one new PDF.
   spending are review states, not permission to click through.
 - Chrome can block multiple downloads after the site has received 100% of a PDF.
   Try the page's observed “手动保存文件” link once; if there is still no local file,
-  pause for the user to handle the browser's blocked-download permission. Don't
+  report “transfer complete, local save not located”; do not diagnose a blocked
+  download without a browser indicator. Ask the user to save or inspect permission. Don't
   restart the transfer, alter broad browser security settings or accept the file.
 
 ## Acceptance and budget

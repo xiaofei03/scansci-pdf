@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pipeline import Batch
-from ablesci import AbleSci, navigate
+from ablesci import AbleSci, navigate, read_chrome, chrome
 from batch import finish_ablesci, requested_complete
 
 
@@ -33,6 +33,27 @@ class DownloadStateTests(unittest.TestCase):
              patch('ablesci.chrome',side_effect=AssertionError('must not navigate')):
             with self.assertRaisesRegex(RuntimeError,'still active'):
                 navigate('https://www.ablesci.com/assist/create')
+
+    def test_read_only_empty_response_is_retried(self):
+        with patch('ablesci.chrome',side_effect=[json.JSONDecodeError('empty','',0),{'ready':True}]) as read, \
+             patch('ablesci.time.sleep'):
+            self.assertEqual(read_chrome('JSON.stringify({ready:true})'),{'ready':True})
+        self.assertEqual(read.call_count,2)
+
+    def test_write_empty_response_is_never_replayed(self):
+        import subprocess
+        response=subprocess.CompletedProcess([],0,'','')
+        with patch('ablesci.subprocess.run',return_value=response) as write:
+            with self.assertRaises(json.JSONDecodeError):chrome('button.click();JSON.stringify({clicked:true})')
+        self.assertEqual(write.call_count,1)
+
+    def test_fast_not_ready_is_not_an_attempt(self):
+        state={'url':self.url,'downloading':True,'text':'高速下载扣 2 积分',
+               'buttons':[{'id':'download-highspeed-direct','disabled':True}]}
+        with patch('ablesci.transfer_state',return_value=state), \
+             patch('ablesci.chrome',side_effect=AssertionError('must wait for button')):
+            self.assertIsNone(self.a.enable_fast(self.doi,50,300))
+        self.assertEqual(self.a.db.execute('SELECT COUNT(*) FROM speed_budget').fetchone()[0],0)
 
     def test_same_url_does_not_restart_transfer(self):
         with patch('ablesci.transfer_state',return_value={'url':self.url,'active':True}), \

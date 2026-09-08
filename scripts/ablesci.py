@@ -72,9 +72,18 @@ def navigate(url, verified_departure=False, refresh=False):
     raise RuntimeError('Page navigation not confirmed')
 
 
+def read_chrome(js):
+    """Retry empty read-only snapshots during page transitions, never writes."""
+    for attempt in range(3):
+        try:return chrome(js)
+        except json.JSONDecodeError:
+            if attempt==2:raise
+            time.sleep(0.5)
+
+
 def snapshot():
     # No hidden fields, cookie values, HTML dump, or authentication data retained.
-    return chrome('''JSON.stringify({url:location.href,title:document.title,
+    return read_chrome('''JSON.stringify({url:location.href,title:document.title,
       text:(Array.from(document.body.innerText.split('实时播报')[0]).slice(0,12000).join('')+'\\n'+
         Array.from(document.querySelectorAll('.layui-layer')).filter(e=>e.getClientRects().length).map(e=>e.innerText).join('\\n')),
       fields:Array.from(document.querySelectorAll('input:not([type=hidden]),textarea,button'))
@@ -92,7 +101,7 @@ def guard(state):
 
 def transfer_state():
     """Visible DOM only; no cookies, site internals, or private download endpoints."""
-    return chrome('''(()=>{const text=document.body.innerText.split('常见问题')[0];
+    return read_chrome('''(()=>{const text=document.body.innerText.split('常见问题')[0];
       const downloading=location.pathname==='/assist/download';
       const complete=/下载已完成|下载完成|下载成功|文件已保存|浏览器已发起保存/.test(text);
       const terminal=complete || /浏览器未能继续接收|下载失败/.test(text);
@@ -341,7 +350,7 @@ class AbleSci:
         if not state['downloading'] or '高速下载扣 2 积分' not in state['text']:
             raise RuntimeError('Fast-download page/2-point price not confirmed')
         if not any(e['id']=='download-highspeed-direct' and not e['disabled'] for e in state['buttons']):
-            return False
+            return None  # Page is still initializing, not a failed/paid attempt.
         self.db.execute('BEGIN IMMEDIATE')
         prior=self.db.execute('SELECT points,status FROM speed_budget WHERE doi=?',(doi,)).fetchone()
         if prior:
@@ -442,11 +451,13 @@ class AbleSci:
                 job['download_progress']={'at':time.time(),'percent':percent,'active':current['active']}
                 self.save_job(job)
             if fast and 'fast' not in tried and not current['complete']:
-                if self.enable_fast(doi,per_paper,total):
+                enabled=self.enable_fast(doi,per_paper,total)
+                if enabled:
                     tried.add('fast');job['download_routes']=list(tried);self.save_job(job)
                     last_progress=time.monotonic();continue
-                tried.add('fast')
-                job['download_routes']=list(tried);self.save_job(job)
+                if enabled is False:
+                    tried.add('fast')
+                    job['download_routes']=list(tried);self.save_job(job)
             if current['failed'] or time.monotonic()-last_progress>120:
                 routes=[e for e in current['buttons'] if not e['disabled'] and e['text'].lstrip().startswith('线路')]
                 route=next((e for e in routes if e['text'].splitlines()[0] not in tried),None)
