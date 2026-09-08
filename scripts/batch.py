@@ -179,7 +179,9 @@ def finish_ablesci(b, dois, downloads_dir, per_paper=0, total=0, wait_seconds=45
                 return b.report()
             deadline = time.monotonic() + max(0, min(wait_seconds, 120))
             while True:
-                navigate(req[1])
+                # Request pages are server-rendered; rereading the same DOM cannot
+                # discover a later upload. This is not the active transfer page.
+                navigate(req[1], refresh=True)
                 state = adapter.reconcile(doi)
                 if state['status'] == 'file_available':
                     result = adapter.download(doi, downloads_dir,download_wait,fast,limit,total)

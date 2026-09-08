@@ -15,6 +15,9 @@ Resume the existing state. Never classify metadata-only or offered files as succ
 Uncertain submission counts against the budget and must be reconciled, not reposted.
 Downloaded PDFs can be picked up by identity after restart; don't require the whole
 Downloads directory to contain exactly one new PDF.
+Request-detail pages need a real refresh on each bounded waiting poll; their old
+DOM can still say “waiting” after an upload has arrived. Refresh only request pages,
+never the active download page. Do not infer uploader delay from a stale snapshot.
 
 ## Transfer behavior
 

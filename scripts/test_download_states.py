@@ -96,6 +96,22 @@ class DownloadStateTests(unittest.TestCase):
             result=finish_ablesci(self.b,[self.doi,'10.1234/second'],self.root,50,300)
         self.assertEqual(len(result),2)
 
+    def test_waiting_request_refreshes_to_discover_new_upload(self):
+        self.job.pop('download_attempt')
+        self.b.save(self.job)
+        visible={'fresh':False}
+        def navigate_request(url, **kwargs):
+            self.assertEqual(url,'https://www.ablesci.com/assist/detail?id=observed')
+            visible['fresh']=kwargs.get('refresh',False)
+        def reconcile_request(doi):
+            return {'status':'file_available' if visible['fresh'] else 'waiting'}
+        with patch('batch.AbleSci',return_value=self.a), \
+             patch('batch.navigate',side_effect=navigate_request), \
+             patch.object(self.a,'reconcile',side_effect=reconcile_request), \
+             patch.object(self.a,'download',return_value={'status':'download_pending'}) as download:
+            finish_ablesci(self.b,[self.doi],self.root,50,300,wait_seconds=0)
+        download.assert_called_once()
+
     def test_fast_budget_reservation_blocks_overspend_before_click(self):
         state={'url':self.url,'downloading':True,'text':'高速下载扣 2 积分',
                'buttons':[{'id':'download-highspeed-direct','disabled':False}]}
