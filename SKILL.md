@@ -5,6 +5,16 @@ description: "Download scholarly PDFs in batches and attach verified files to a 
 
 # Scholarly PDF acquisition
 
+## Separate helping mode (experimental)
+
+When explicitly asked to **answer other users' AbleSci requests**, read
+[references/assist-bot.md](references/assist-bot.md) and use `scripts/assist_bot.py`.
+This is separate from requesting PDFs for Zotero: it does not import, spend request
+points, use browser control, or automatically start a service. The Unix headless
+runner is implemented, but authenticated upload and extended unattended operation
+have not yet been verified live. Do not present a scan/download test as proof of
+successful helping. Only verified redistributable, unmodified files qualify.
+
 Use the included scripts, not code stored in a manuscript project. Resolve all paths
 relative to this SKILL.md. Do not assume another computer has the same paths, login
 state, collection, MCP server, or installed Python environment.
