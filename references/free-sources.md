@@ -33,6 +33,11 @@ not reset budgets or retry any DOI with an existing AbleSci request record.
 Source version labels are recorded. Known accepted/submitted versions get an Author
 Manuscript attachment title. A shorter-than-published copy still needs the existing
 hash-bound user-approved version review; new sources do not loosen validation.
+Native Zotero lookup reports per-item start/end timestamps for new runs. A batch
+lookup remains serial; distinguish its elapsed time from the concurrent free-source
+phase. A native title/author-only `probably_correct` match must not be reported as a
+DOI-confirmed publisher version. Inspect version evidence or probe an entitled source
+when the user needs the final published version; do not silently replace attachments.
 
 ## TLS and HTTP 403 recovery
 

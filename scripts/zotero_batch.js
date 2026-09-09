@@ -1,6 +1,6 @@
 // Executed once in Zotero's built-in Run JavaScript window. `request` is generated
 // by zotero_gui.py, never read from a webpage. No HTTP endpoint is registered.
-const state = {run_id: request.run_id, status: 'running', action: request.action, rows: []};
+const state = {run_id: request.run_id, status: 'running', action: request.action, started_at_ms: Date.now(), rows: []};
 async function checkpoint() {
     await Zotero.File.putContentsAsync(request.report, JSON.stringify(state));
 }
@@ -16,7 +16,7 @@ try {
         }
         if (item.getField('DOI').toLowerCase() !== entry.doi.toLowerCase()
             || item.getField('title') !== entry.title) throw Error('Item identity changed');
-        const row = {key: item.key, doi: entry.doi, status: 'started'};
+        const row = {key: item.key, doi: entry.doi, status: 'started', started_at_ms: Date.now()};
         state.rows.push(row);
         await checkpoint();
         try {
@@ -53,6 +53,8 @@ try {
             row.status = 'error';
             row.error = String(e.message || e);
         }
+        row.finished_at_ms = Date.now();
+        row.seconds = (row.finished_at_ms - row.started_at_ms) / 1000;
         await checkpoint();
     }
     state.status = 'complete';
@@ -60,5 +62,7 @@ try {
     state.status = 'error';
     state.error = String(e.message || e);
 }
+state.finished_at_ms = Date.now();
+state.seconds = (state.finished_at_ms - state.started_at_ms) / 1000;
 await checkpoint();
 return JSON.stringify(state);

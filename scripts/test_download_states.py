@@ -8,10 +8,30 @@ from unittest.mock import patch
 
 from pipeline import Batch
 from ablesci import AbleSci, navigate, read_chrome, chrome
-from batch import finish_ablesci, requested_complete
+from batch import finish_ablesci, requested_complete, only_review_remaining
 
 
 class DownloadStateTests(unittest.TestCase):
+    def test_review_only_batch_does_not_touch_browser_or_poll(self):
+        self.b.save({**self.job,'status':'existing_outside_target'})
+        with patch('batch.transfer_state',side_effect=AssertionError('no browser')):
+            result=finish_ablesci(self.b,[self.doi],self.root,50,100)
+        self.assertTrue(self.b.needs_review)
+        self.assertTrue(only_review_remaining(result,[self.doi]))
+
+    def test_review_gate_preserves_other_actionable_jobs(self):
+        a={'doi':'10.1234/a','status':'existing_outside_target'}
+        b={'doi':'10.1234/b','status':'needs_ablesci'}
+        dois=[a['doi'],b['doi']]
+        self.assertFalse(only_review_remaining([a,b],dois))
+        self.assertFalse(only_review_remaining([a],dois))
+        for status in ('resolver_pending','metadata_error','metadata_ready','attachment_session_required'):
+            self.assertFalse(only_review_remaining([a,{**b,'status':status}],dois))
+        complete={**b,'status':'complete','source':'ablesci'}
+        self.assertFalse(only_review_remaining([a,complete],dois,accept=True))
+        self.assertTrue(only_review_remaining([a,{**complete,'ablesci_accepted':True}],dois,accept=True))
+        self.assertFalse(only_review_remaining([complete],[b['doi']]))
+
     def setUp(self):
         parent=Path('_work/pdf_pipeline_tests');parent.mkdir(parents=True,exist_ok=True)
         self.root=Path(tempfile.mkdtemp(dir=parent))

@@ -24,6 +24,25 @@ def attachment_complete(adapter, doi):
     return adapter.job(doi).get('status')=='complete'
 
 
+def only_review_remaining(results, dois, accept=False):
+    """Stop idle polling only when every outstanding job requires a user decision.
+
+    Missing jobs, native writes, uploader waits and unconfirmed acceptance remain
+    actionable/pending, not evidence of a review-only batch.
+    """
+    states={j['doi']:j for j in results}
+    pending=[]
+    for d in {doi_normalize(d) for d in dois}:
+        job=states.get(d)
+        if job is None:return False
+        if job.get('status')=='complete':
+            if accept and job.get('source')=='ablesci' and not job.get('ablesci_accepted'):return False
+            continue
+        pending.append(job)
+    return bool(pending) and all(j.get('status') in
+        ('existing_outside_target','duplicate_needs_review','gui_result_needs_review') for j in pending)
+
+
 def completion_exit_code(results, dois, accept=False, needs_review=False):
     if requested_complete(results, dois, accept):
         return 0
@@ -120,6 +139,13 @@ def _run(b, dois, test_skip_find, test_force_gui_attach, pool):
 
 def finish_ablesci(b, dois, downloads_dir, per_paper=0, total=0, wait_seconds=45,
                    download_wait=900, fast=False, accept=False, paper_budgets=None, allow_site_minimum=False):
+    current_results=b.report()
+    if only_review_remaining(current_results,dois,accept):
+        b.needs_review=True
+        b.event({'doi':''},'batch_requires_decision',
+                jobs=[{'doi':j['doi'],'status':j['status']} for j in current_results
+                      if j['doi'] in {doi_normalize(d) for d in dois} and j['status']!='complete'])
+        return current_results
     adapter = AbleSci(b.root)
     b.needs_review=False
     if not resume_gui(b,dois):return b.report()
@@ -226,7 +252,9 @@ def finish_ablesci(b, dois, downloads_dir, per_paper=0, total=0, wait_seconds=45
             b.needs_review=True
             b.event(job, 'ablesci_needs_review', error=str(e))
             return b.report()  # Browser-wide failures must not cascade across every DOI.
-    return b.report()
+    results=b.report()
+    if only_review_remaining(results,dois,accept):b.needs_review=True
+    return results
 
 
 def main():
