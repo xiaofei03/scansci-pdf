@@ -72,8 +72,12 @@ def public_url(url):
 
 
 class SafeRedirect(request.HTTPRedirectHandler):
+    def __init__(self, allowed_hosts=None):
+        self.allowed_hosts = allowed_hosts
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         public_url(newurl)
+        if self.allowed_hosts is not None: source_url(newurl, self.allowed_hosts)
         result = super().redirect_request(req, fp, code, msg, headers, newurl)
         old, new = urlparse.urlsplit(req.full_url), urlparse.urlsplit(newurl)
         if old.netloc != new.netloc or old.scheme != new.scheme:
@@ -85,12 +89,19 @@ class SafeRedirect(request.HTTPRedirectHandler):
         return result
 
 
-def _download_bytes(url, headers, deadline, limit, timeout, context=None):
+def source_url(url, allowed_hosts):
+    p = urlparse.urlsplit(public_url(url))
+    if p.scheme != 'https' or p.hostname not in allowed_hosts or p.port not in (None,443):
+        raise ValueError('source_url_not_allowed')
+
+
+def _download_bytes(url, headers, deadline, limit, timeout, context=None, allowed_hosts=None):
     public_url(url)
+    if allowed_hosts is not None: source_url(url, allowed_hosts)
     remaining = deadline - time.monotonic()
     if remaining <= 0: raise TimeoutError('lookup_deadline')
     req = request.Request(url, headers={'User-Agent': 'ScansciPDF/0.2 (personal research)', **headers})
-    handlers = [SafeRedirect()]
+    handlers = [SafeRedirect(allowed_hosts)]
     if context is not None: handlers.append(request.HTTPSHandler(context=context))
     with request.build_opener(*handlers).open(req, timeout=min(timeout, remaining)) as r:
         parts, count = [], 0
@@ -113,9 +124,9 @@ def tls_record_failure(error):
             'record layer failure' in str(cause).lower())
 
 
-def download_bytes(url, headers, deadline, limit, timeout=12, transport_events=None):
+def download_bytes(url, headers, deadline, limit, timeout=12, transport_events=None, allowed_hosts=None):
     try:
-        return _download_bytes(url, headers, deadline, limit, timeout)
+        return _download_bytes(url, headers, deadline, limit, timeout, allowed_hosts=allowed_hosts)
     except (ssl.SSLError, urllib.error.URLError) as error:
         if not tls_record_failure(error) or time.monotonic() >= deadline: raise
         # Narrow per-request compatibility retry, no global TLS/proxy/CA change.
@@ -126,7 +137,7 @@ def download_bytes(url, headers, deadline, limit, timeout=12, transport_events=N
         if transport_events is not None:
             transport_events.append(dict(status='tls12_retry', reason='tls_record_error'))
         # Discard any partial bytes. Same deadline/limits and safe redirect handler.
-        return _download_bytes(url, headers, deadline, limit, timeout, context=context)
+        return _download_bytes(url, headers, deadline, limit, timeout, context=context, allowed_hosts=allowed_hosts)
 
 
 def identity(value):
@@ -142,11 +153,13 @@ class MetaTags(HTMLParser):
 
 
 class FreeSources:
-    def __init__(self, root, config=None, seconds=75):
+    def __init__(self, root, config=None, seconds=75, scihub_oa=None):
         self.root = Path(root) / 'free_sources'
         self.root.mkdir(parents=True, exist_ok=True)
         self.config = settings() if config is None else {k: config.get(k, '') for k in ENV}
         self.seconds = seconds
+        self.scihub_oa = (os.environ.get('SCANSCI_SCIHUB_OA','1').lower() not in ('0','false','off')
+                         if scihub_oa is None else bool(scihub_oa))
         self.lock = threading.Lock()
         self.host_locks, self.cooldowns = {}, {}
         self.challenge_hosts = set()
@@ -166,8 +179,15 @@ class FreeSources:
             events.append(dict(source=source, status='deadline')); return None
         transport_events = []
         try:
+            restricted = None
+            if source == 'scihub_oa':
+                from scihub_oa import HOST
+                restricted = {HOST}
+                source_url(url, restricted)
+                # No API keys, cookies or personal headers enter this adapter.
+                headers = {'Accept': 'application/pdf' if pdf else 'text/html'}
             data, final = download_bytes(url, headers, deadline, 60*1024*1024 if pdf else 4*1024*1024,
-                                         transport_events=transport_events)
+                                         transport_events=transport_events, allowed_hosts=restricted)
             events.append(dict(source=source, status='received', host=host, bytes=len(data),
                                seconds=round(time.monotonic()-start, 3), phase='pdf' if pdf else 'discovery'))
             return data, final
@@ -328,8 +348,17 @@ class FreeSources:
                        source_url=safe_url, source_version=c['version'])
             path.with_suffix('.json').write_text(json.dumps({k:out[k] for k in ('source','source_url','source_version')}), encoding='utf-8')
             return {**out, 'events':events, 'seconds':round(time.monotonic()-start,3)}
-        return dict(status='unresolved', events=events, seconds=round(time.monotonic()-start,3),
-                    deadline_reached=time.monotonic() >= deadline)
+        result = self.acquire_scihub_oa(meta, deadline)
+        result['events'] = events + result['events']
+        result['seconds'] = round(time.monotonic()-start,3)
+        result['deadline_reached'] = time.monotonic() >= deadline
+        return result
+
+    def acquire_scihub_oa(self, meta, deadline=None):
+        from scihub_oa import acquire
+        if not self.scihub_oa:
+            return dict(status='unresolved',events=[dict(source='scihub_oa',status='disabled')],seconds=0)
+        return acquire(self, meta, deadline if deadline is not None else time.monotonic()+self.seconds)
 
 
 def main():
@@ -338,6 +367,8 @@ def main():
     p.add_argument('--status', action='store_true')
     p.add_argument('--doi', action='append', default=[])
     p.add_argument('--work-dir')
+    p.add_argument('--scihub-oa-only', action='store_true', help='Test only the license-gated optional source')
+    p.add_argument('--no-scihub-oa', action='store_true', help='Disable the license-gated source')
     args = p.parse_args()
     if args.configure: configure(); return
     cfg = settings()
@@ -345,11 +376,11 @@ def main():
         print(json.dumps({k:bool(v) for k,v in cfg.items()})); return
     if not args.doi or not args.work_dir: p.error('provide --doi and --work-dir, or --configure/--status')
     from pipeline import crossref, doi_normalize
-    engine = FreeSources(args.work_dir, cfg)
+    engine = FreeSources(args.work_dir, cfg, scihub_oa=False if args.no_scihub_oa else None)
     # Read-only metadata/PDF test: never modifies Zotero or creates AbleSci requests.
     metas = [crossref(doi_normalize(d)) for d in args.doi]
     with ThreadPoolExecutor(max_workers=3) as pool:
-        results = list(pool.map(engine.acquire, metas))
+        results = list(pool.map(engine.acquire_scihub_oa if args.scihub_oa_only else engine.acquire, metas))
     for meta, result in zip(metas, results):
         print(json.dumps({'doi':meta['doi'], **result}, ensure_ascii=False))
 

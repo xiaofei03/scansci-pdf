@@ -38,8 +38,12 @@ user action. Do not weaken identity checks or change security settings to meet a
    **Zotero full lookup → OA/publisher fallback → AbleSci → validation → managed PDF**.
    Reuse the same work directory to resume and preserve the cumulative point ledger.
    Free fallback now uses bounded network workers, Unpaywall/OpenAlex discovery,
-   public publisher links and optional entitled Elsevier PDF retrieval. Credentials
-   are optional and never inherited from a Git repository. After changing credentials,
+   public publisher links and optional entitled Elsevier PDF retrieval.
+   After those sources fail, a license-gated Sci-Hub OA-copy adapter is enabled by
+   default; unknown/subscription-only rights are skipped. No API key is needed.
+   See free-sources.md for the narrow license gate and opt-out; this is not a
+   subscription-access route.
+   Credentials are optional and never inherited from a Git repository. After changing credentials,
    `--retry-free` explicitly retries missing jobs without existing AbleSci requests.
    For an explicitly requested unattended batch, use `--until-complete` and a
    suitable `--max-run-seconds`; observe the live process, not repeated fresh runs.

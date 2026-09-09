@@ -103,7 +103,7 @@ def crossref(doi):
                 year=str((m.get('published', {}).get('date-parts') or [['']])[0][0]),
                 url=m.get('resource', {}).get('primary', {}).get('URL') or m['URL'],
                 page_range=m.get('page', ''), metadata_source='Crossref',
-                links=m.get('link', []))
+                links=m.get('link', []), licenses=m.get('license', []))
 
 
 def validate_pdf(path, meta):
@@ -316,6 +316,7 @@ class Batch:
         self.event(job, 'free_lookup_finished', status=result['status'], seconds=result['seconds'])
         if result['status'] == 'verified':
             job.update({k:result[k] for k in ('pdf','source','source_url','source_version','validation')})
+            if result.get('license_evidence'): job['license_evidence'] = result['license_evidence']
             if result['source_version'] in ('acceptedVersion', 'submittedVersion'):
                 job['attachment_title'] = 'Author Manuscript ('+result['source_version']+')'
             self.save(job)

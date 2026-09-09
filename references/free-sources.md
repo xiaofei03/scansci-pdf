@@ -12,7 +12,8 @@ pages must match DOI and normalized title before following citation_pdf_url.
 Repository PDFs exposed by these indexes are supported, but there is no independent
 CORE/Semantic Scholar/search-engine adapter or unrestricted website crawler.
 
-At most 6 unique URLs are downloaded per paper, preferring reported published versions.
+At most 6 primary candidate URLs are downloaded per paper, preferring reported published versions.
+If none succeeds, the license-gated supplementary source below may try one more PDF.
 Default lookup budget: 75 seconds per paper including discovery; discovery has an
 18-second cooperative budget and sockets a maximum 12-second blocking timeout.
 These are cooperative bounds, NOT a hard process timeout: DNS, one blocking read or
@@ -58,6 +59,48 @@ hash-bound user-approved version review; new sources do not loosen validation.
   without cached PDFs yielded 2 verified files in 10.252 s for the free-source
   phase, excluding metadata preparation and Zotero import. No universal rate or
   timing guarantee follows from this small test.
+
+## License-gated Sci-Hub OA-copy supplement
+
+`scripts/scihub_oa.py` is a bounded HTML/PDF adapter, not an official API or the
+previously reviewed insecure third-party client. It runs after ordinary free-source
+failure, before any authorized AbleSci request. No extra package or key is needed.
+
+- Enabled by default, but only metadata obtained from Crossref with an already
+  effective **version-of-record** CC BY, CC BY-SA or CC0 license qualifies. A bare OA
+  flag, TDM/author-manuscript-only license, subscription entitlement or unknown rights
+  does not qualify. Missing/malformed license records fail closed, without a request.
+  This narrow gate does not add access to arbitrary subscription-only papers.
+- The tested host is `sci-hub.ru`. Initial URLs, PDF links and redirects must stay
+  HTTPS on that same host; no mirror search/rotation, credentials, cookies, browser
+  fingerprinting, CAPTCHA solving or certificate-check bypass. Changed page structure,
+  multiple different PDF links or access challenges stop this source.
+- At most one landing page and one unique linked PDF, with a 25-second cooperative
+  phase budget inside the original overall deadline. The existing narrow TLS-record
+  compatibility retry may repeat a request once; it retains verified TLS. Network
+  reads, DNS and validation can overrun a cooperative deadline.
+- Require the existing DOI/title/author/readability/page-count checks to return
+  `verified`, not merely a title-only probable match. Keep source and license evidence
+  in the result/job. Do not assume a manuscript version from the host or license record.
+  Separate cache under `free_sources/scihub_oa/` rechecks license, identity and hash.
+- Set `SCANSCI_SCIHUB_OA=0` to disable in all batch entrypoints, or use
+  `free_sources.py --no-scihub-oa` for a free-source probe. Existing saved jobs without
+  Crossref license metadata skip this route; `--retry-free` alone does not refresh
+  old metadata. Do not discard their batch state or point ledger to force a retry.
+
+Direct adapter test (no Zotero write, browser control or point spending):
+
+```sh
+python3 scripts/free_sources.py --doi 10.1038/s41586-021-03819-2 \
+  --scihub-oa-only --work-dir /project/_work/scihub_oa_probe
+```
+
+This switch still enforces the license gate. One successful sample is not evidence of
+general coverage, an official API, or reliable end-to-end batch performance.
+On 2026-09-09 the earlier AlphaFold diagnostic succeeded, but two integrated live
+probes returned a PDF-transfer timeout and no supported PDF link, respectively.
+Treat the route as best-effort; do not describe it as a stable replacement for OA
+repositories or authorized subscription access.
 
 ## One-time configuration
 
