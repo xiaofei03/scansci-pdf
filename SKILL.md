@@ -41,6 +41,8 @@ user action. Do not weaken identity checks or change security settings to meet a
    public publisher links and optional entitled Elsevier PDF retrieval.
    After those sources fail, a license-gated Sci-Hub OA-copy adapter is enabled by
    default; unknown/subscription-only rights are skipped. No API key is needed.
+   It receives its own 60-second budget, independent of primary lookup elapsed time;
+   `SCANSCI_SCIHUB_SECONDS` sets a different positive duration.
    See free-sources.md for the narrow license gate and opt-out; this is not a
    subscription-access route.
    Credentials are optional and never inherited from a Git repository. After changing credentials,

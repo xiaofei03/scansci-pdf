@@ -14,7 +14,7 @@ CORE/Semantic Scholar/search-engine adapter or unrestricted website crawler.
 
 At most 6 primary candidate URLs are downloaded per paper, preferring reported published versions.
 If none succeeds, the license-gated supplementary source below may try one more PDF.
-Default lookup budget: 75 seconds per paper including discovery; discovery has an
+Default primary lookup budget: 75 seconds per paper including discovery; discovery has an
 18-second cooperative budget and sockets a maximum 12-second blocking timeout.
 These are cooperative bounds, NOT a hard process timeout: DNS, one blocking read or
 PDF parsing may overrun the budget. No infinite retries or paywall/verification bypass.
@@ -80,10 +80,15 @@ failure, before any authorized AbleSci request. No extra package or key is neede
   HTTPS on that same host; no mirror search/rotation, credentials, cookies, browser
   fingerprinting, CAPTCHA solving or certificate-check bypass. Changed page structure,
   multiple different PDF links or access challenges stop this source.
-- At most one landing page and one unique linked PDF, with a 25-second cooperative
-  phase budget inside the original overall deadline. The existing narrow TLS-record
+- At most one landing page and one unique linked PDF, with its own 60-second cooperative
+  phase budget starting when this source begins, even if the primary 75-second
+  budget has expired. `SCANSCI_SCIHUB_SECONDS=120` changes this to 120 seconds;
+  accept only positive finite values, not infinite waits. The existing narrow TLS-record
   compatibility retry may repeat a request once; it retains verified TLS. Network
   reads, DNS and validation can overrun a cooperative deadline.
+  Total free-phase time may now include both budgets. `seconds` includes both phases;
+  `primary_deadline_reached` (and compatibility field `deadline_reached`) refers to
+  the primary budget only and does not mean the supplementary source failed.
 - Require the existing DOI/title/author/readability/page-count checks to return
   `verified`, not merely a title-only probable match. Keep source and license evidence
   in the result/job. Do not assume a manuscript version from the host or license record.

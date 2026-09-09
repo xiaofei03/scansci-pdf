@@ -8,6 +8,8 @@ Python 3.10+；运行依赖见 requirements.txt，测试依赖见 requirements-d
 常规免费来源失败后，默认尝试经 Crossref 开放许可验证的 Sci-Hub OA 副本补缺；
 不适用于许可不明或仅订阅可读的论文，不需要 API key，不操作浏览器。
 全批禁用可设置 `SCANSCI_SCIHUB_OA=0`；许可、超时及失败边界见 free-sources.md。
+Sci-Hub 使用独立 60 秒预算，不消耗前序渠道的剩余时间；可用 `SCANSCI_SCIHUB_SECONDS`
+单独调整为正数秒，仍保留请求超时和失败退出。
 
 ## 首次配置
 

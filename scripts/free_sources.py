@@ -153,11 +153,16 @@ class MetaTags(HTMLParser):
 
 
 class FreeSources:
-    def __init__(self, root, config=None, seconds=75, scihub_oa=None):
+    def __init__(self, root, config=None, seconds=75, scihub_oa=None, scihub_seconds=None):
         self.root = Path(root) / 'free_sources'
         self.root.mkdir(parents=True, exist_ok=True)
         self.config = settings() if config is None else {k: config.get(k, '') for k in ENV}
         self.seconds = seconds
+        import math
+        self.scihub_seconds=float(os.environ.get('SCANSCI_SCIHUB_SECONDS','60')
+                                  if scihub_seconds is None else scihub_seconds)
+        if not math.isfinite(self.scihub_seconds) or self.scihub_seconds <= 0:
+            raise ValueError('SCANSCI_SCIHUB_SECONDS must be a positive finite number')
         self.scihub_oa = (os.environ.get('SCANSCI_SCIHUB_OA','1').lower() not in ('0','false','off')
                          if scihub_oa is None else bool(scihub_oa))
         self.lock = threading.Lock()
@@ -348,17 +353,19 @@ class FreeSources:
                        source_url=safe_url, source_version=c['version'])
             path.with_suffix('.json').write_text(json.dumps({k:out[k] for k in ('source','source_url','source_version')}), encoding='utf-8')
             return {**out, 'events':events, 'seconds':round(time.monotonic()-start,3)}
-        result = self.acquire_scihub_oa(meta, deadline)
+        # The supplementary source owns a fresh budget, even if primary lookup expired.
+        result = self.acquire_scihub_oa(meta)
         result['events'] = events + result['events']
         result['seconds'] = round(time.monotonic()-start,3)
         result['deadline_reached'] = time.monotonic() >= deadline
+        result['primary_deadline_reached'] = result['deadline_reached']
         return result
 
     def acquire_scihub_oa(self, meta, deadline=None):
         from scihub_oa import acquire
         if not self.scihub_oa:
             return dict(status='unresolved',events=[dict(source='scihub_oa',status='disabled')],seconds=0)
-        return acquire(self, meta, deadline if deadline is not None else time.monotonic()+self.seconds)
+        return acquire(self, meta, deadline if deadline is not None else time.monotonic()+self.scihub_seconds)
 
 
 def main():

@@ -129,5 +129,22 @@ class SupplementTests(unittest.TestCase):
         with patch('pipeline.remote_json',return_value={'message':record}):
             self.assertEqual(crossref(self.meta['doi'])['licenses'],self.meta['licenses'])
 
+    def test_independent_budget_after_primary_expiry(self):
+        self.engine.seconds=0
+        with patch.object(self.engine,'provider',return_value=([],[])), \
+             patch.object(self.engine,'fetch',return_value=(self.pdf(),'https://'+HOST+'/a.pdf')) as call:
+            result=self.engine.acquire(self.meta)
+        self.assertEqual(result['status'],'verified')
+        self.assertTrue(result['primary_deadline_reached'])
+        self.assertGreater(call.call_args.args[3]-time.monotonic(),50)
+
+    def test_configurable_source_budget(self):
+        with patch.dict(os.environ,{'SCANSCI_SCIHUB_SECONDS':'120'}):
+            engine=FreeSources(self.root,config={})
+            self.assertEqual(engine.scihub_seconds,120)
+        for value in ('nan','inf','0','-1','bad'):
+            with patch.dict(os.environ,{'SCANSCI_SCIHUB_SECONDS':value}):
+                with self.assertRaises(ValueError):FreeSources(self.root,config={})
+
 
 if __name__=='__main__': unittest.main()

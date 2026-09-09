@@ -63,8 +63,7 @@ def acquire(engine, meta, deadline):
         event('open_license_not_verified'); return done()
     if start >= deadline:
         event('deadline'); return done()
-    # Cap this supplementary source's whole phase without extending the batch budget.
-    deadline=min(deadline,start+25)
+    # Caller supplies this source's independent budget, not primary lookup leftovers.
     event('open_license_verified',license_url=proof['license_url'])
     root=engine.root/SOURCE/hashlib.sha256(meta['doi'].encode()).hexdigest()[:20]
     root.mkdir(parents=True,exist_ok=True)
