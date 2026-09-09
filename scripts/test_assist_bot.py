@@ -10,7 +10,8 @@ import unittest
 from unittest.mock import patch
 
 from assist_bot import (Halt, Ledger, detail_page, eligible, multipart, request_id,
-                        safe_host, scan_page, upload, STOP, Site, lookup_child, reconcile, authenticate)
+                        safe_host, scan_page, upload, STOP, Site, lookup_child, reconcile, authenticate,
+                        require_pdf_runtime)
 
 
 def detail_html(state='waiting', note='', owner='OTHER', doi='10.1000/test'):
@@ -26,6 +27,20 @@ def detail_html(state='waiting', note='', owner='OTHER', doi='10.1000/test'):
 
 
 class BotTests(unittest.TestCase):
+    def test_missing_pdf_runtime_fails_before_login(self):
+        with patch('assist_bot.importlib.import_module', side_effect=ImportError):
+            with self.assertRaisesRegex(Halt, 'pdf_runtime_missing'):
+                require_pdf_runtime()
+
+    def test_pdf_runtime_version_range(self):
+        from types import SimpleNamespace
+        for version in ('6.9.0', '7.0.0', 'unknown'):
+            with patch('assist_bot.importlib.import_module', return_value=SimpleNamespace(__version__=version)):
+                with self.assertRaises(Halt):
+                    require_pdf_runtime()
+        with patch('assist_bot.importlib.import_module', return_value=SimpleNamespace(__version__='6.10.0')):
+            self.assertEqual(require_pdf_runtime(), {'pypdf_version': '6.10.0'})
+
     def tearDown(self):
         STOP.clear()
 

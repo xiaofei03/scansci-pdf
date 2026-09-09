@@ -9,6 +9,9 @@ supported by its current lock implementation. Installing the skill does not star
 
 Verified so far:
 
+- User-provided terminal output confirms two successful pure-HTTP `login-check`
+  runs with `logged_in: true`, `session_persisted: false`, `uploaded: 0`.
+  This verifies login, not an active session available to another process or upload.
 - Real public waiting-list extraction, excluding pinned notices and already-uploaded
   list entries; real detail DOI/title/owner parsing.
 - Real AlphaFold PDF acquisition through Unpaywall/publisher, 12 pages, DOI/title/
@@ -21,8 +24,7 @@ Verified so far:
 - The upload handshake was read from the site's logged-in form using a one-time
   read-only inspection of the existing local browser session, without cookie export.
 
-NOT yet verified: pure-HTTP authenticated login with this account, real storage
-upload/callback, per-upload acceptance/points reconciliation, cloud-network behavior,
+NOT yet verified: real storage upload/callback, per-upload acceptance/points reconciliation, cloud-network behavior,
 or a 5–24-hour soak test. Thus it is **not yet a proven production points bot**.
 No live upload or recurring deployment was performed during this implementation.
 
@@ -46,6 +48,14 @@ intended scale before long-running deployment; respect account/server limits.
 Use a private work directory **outside the skill repository**. In this manuscript
 project use `_work/<run>/`. Keep that directory stable for all resumes. Do not share
 it between cloud and local processes concurrently; the local lock is not distributed.
+
+`login-check` uses only the Python standard library. Its success does not prove that
+the selected Python has pypdf for real downloading. `run`/`resolve`/`reconcile` now
+check the declared pypdf version before authentication/network work; use the skill's
+dedicated environment rather than assuming the system `python3` has dependencies.
+Once login-check has succeeded, proceed to a bounded `run`; do not ask the user to
+repeat login-only checks unnecessarily. Each independent run still needs its own
+in-memory login, because no session credentials are saved.
 
 ```sh
 # Read-only list; creates a local ledger but does not log in/upload.

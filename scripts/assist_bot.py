@@ -13,6 +13,7 @@ import hashlib
 from html.parser import HTMLParser
 import http.cookiejar
 import ipaddress
+import importlib
 import json
 import math
 import os
@@ -457,6 +458,21 @@ def finite_positive(value):
     return n
 
 
+def require_pdf_runtime():
+    """Fail before login rather than marking every lookup failed in a wrong Python."""
+    try:
+        pdf = importlib.import_module('pypdf')
+    except ImportError:
+        raise Halt('pdf_runtime_missing_use_python_with_skill_requirements') from None
+    try:
+        version = tuple(int(n) for n in pdf.__version__.split('.')[:2])
+    except (AttributeError, ValueError):
+        raise Halt('pdf_runtime_version_unrecognized') from None
+    if not (version >= (6, 10) and version < (7, 0)):
+        raise Halt('pdf_runtime_version_requires_pypdf_6_10_to_below_7')
+    return {'pypdf_version': pdf.__version__}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=['scan', 'run', 'status', 'resolve', 'login-check', 'reconcile'])
@@ -474,6 +490,10 @@ def main():
     os.umask(0o077)
     if args.max_daily_uploads < 1 or args.max_items_per_cycle < 1 or args.poll_seconds < 30:
         parser.error('positive limits and poll interval >=30 seconds required')
+    if args.mode in ('run', 'resolve', 'reconcile'):
+        runtime = require_pdf_runtime()
+        if args.mode == 'run':
+            print(json.dumps({'stage': 'runtime_ready', **runtime}), flush=True)
     if args.mode == 'resolve':
         from pipeline import doi_normalize
         print(json.dumps(resolve(args.work_dir, doi_normalize(args.doi or ''))))
