@@ -47,6 +47,14 @@ def resume_gui(b, dois):
 
 
 def run(b, dois, test_skip_find=False, test_force_gui_attach=False):
+    from concurrent.futures import ThreadPoolExecutor
+    # Only network discovery/PDF validation run concurrently. All SQLite and Zotero
+    # operations remain on the owning thread. No background writes after return.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        return _run(b, dois, test_skip_find, test_force_gui_attach, pool)
+
+
+def _run(b, dois, test_skip_find, test_force_gui_attach, pool):
     if not resume_gui(b,dois):return b.report()
     jobs = []
     for doi in dict.fromkeys(doi_normalize(d) for d in dois):
@@ -78,6 +86,13 @@ def run(b, dois, test_skip_find=False, test_force_gui_attach=False):
     if test_skip_find:
         b.event({'doi': ''}, 'test_mode', full_zotero='intentionally_skipped')
     b.zotero_oa = False  # Full lookup already included OA; do not repeat it.
+    from free_sources import FreeSources
+    if not hasattr(b, 'free_sources'): b.free_sources = FreeSources(b.root)
+    b.free_futures = {}
+    for original in missing:
+        current = json.loads(b.db.execute('SELECT data FROM jobs WHERE doi=?', (original['doi'],)).fetchone()[0])
+        if current['status'] != 'complete' and (test_skip_find or current.get('full_lookup_complete')):
+            b.free_futures[current['doi']] = pool.submit(b.free_sources.acquire, current['metadata'])
     delayed = [j for j in jobs if j['status'] == 'attachment_session_required' and j.get('pdf')]
     for original in missing:
         row = b.db.execute('SELECT data FROM jobs WHERE doi=?', (original['doi'],)).fetchone()
@@ -228,6 +243,7 @@ def main():
     p.add_argument('--downloads-dir')
     p.add_argument('--chrome-preferences', help='Optional strict native-browser-save diagnostic; omit for default delivered-blob export')
     p.add_argument('--preflight-only', action='store_true', help='Check download setup without library/browser writes or spending')
+    p.add_argument('--retry-free', action='store_true', help='Explicitly retry unresolved free lookup after credentials/network change; never duplicate submitted AbleSci jobs')
     p.add_argument('--approved-per-paper-points', type=int, default=0)
     p.add_argument('--approved-total-points', type=int, default=0)
     p.add_argument('--ablesci-wait-seconds', type=int, default=45)
@@ -263,6 +279,15 @@ def main():
     lock=open(b.root/'runner.lock','a')
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:p.error('Another runner owns this batch; inspect it instead of starting another')
+    if args.retry_free:
+        for d in dict.fromkeys(doi_normalize(d) for d in dois):
+            row = b.db.execute('SELECT data FROM jobs WHERE doi=?', (d,)).fetchone()
+            if not row: continue
+            job = json.loads(row[0])
+            has_requests = b.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='requests'").fetchone()
+            requested = has_requests and b.db.execute('SELECT 1 FROM requests WHERE doi=?', (d,)).fetchone()
+            if job['status'] == 'needs_ablesci' and not requested:
+                job['status'] = 'metadata_ready'; b.save(job)
     started=time.monotonic()
     results = run(b, dois, args.test_skip_find, args.test_force_gui_attach)
     if args.ablesci:

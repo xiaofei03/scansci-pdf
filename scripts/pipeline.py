@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 from html.parser import HTMLParser
-from itertools import chain
 import json
 import re
 import sqlite3
@@ -100,7 +99,7 @@ def crossref(doi):
                 authors=[a.get('family', '') for a in m.get('author', [])],
                 creators=[dict(creatorType='author', firstName=a.get('given', ''), lastName=a.get('family', ''))
                           for a in m.get('author', []) if a.get('family')],
-                journal=(m.get('container-title') or [''])[0],
+                journal=(m.get('container-title') or [''])[0], publisher=m.get('publisher', ''),
                 year=str((m.get('published', {}).get('date-parts') or [['']])[0][0]),
                 url=m.get('resource', {}).get('primary', {}).get('URL') or m['URL'],
                 page_range=m.get('page', ''), metadata_source='Crossref',
@@ -308,41 +307,19 @@ class Batch:
                 job['status'] = 'resolver_pending'
                 self.save(job)
                 return job
-        candidates = []
-        try:
-            oa = remote_json('https://api.openalex.org/works/https://doi.org/' + urllib.parse.quote(doi, safe=''))
-            if (oa.get('doi') or '').lower().removeprefix('https://doi.org/') == doi:
-                candidates += [('openalex', loc['pdf_url']) for loc in oa.get('locations', [])
-                               if loc.get('is_oa') and loc.get('pdf_url')]
-        except Exception as e:
-            self.event(job, 'openalex', result=type(e).__name__)
-        # Crossref publisher-provided PDF URLs are attempted normally, never bypassed.
-        candidates += [('publisher', l['URL']) for l in meta['links'] if l.get('content-type') == 'application/pdf']
-        seen = set()
-        for source, url in chain(candidates, publisher_pdf_urls(meta)):
-            if url in seen:
-                continue
-            if len(seen) >= 6:
-                break
-            seen.add(url)
-            path = self.root / (hashlib.sha256((doi + url).encode()).hexdigest()[:20] + '.pdf')
-            try:
-                if not path.exists():
-                    data, final, _ = http(url, timeout=25)
-                    if not data.startswith(b'%PDF-'):
-                        self.event(job, source, result='not_pdf')
-                        continue
-                    path.write_bytes(data)
-                check = validate_pdf(path, meta)
-                self.event(job, source, validation=check)
-                if check['status'] not in ('verified', 'probably_correct'):
-                    continue
-                job.update(pdf=str(path), source=source, source_url=url, validation=check)
-                self.save(job)
-                return self.attach(job)
-            except Exception as e:
-                self.event(job, source, result=type(e).__name__)
-            time.sleep(1)
+        from free_sources import FreeSources
+        if not hasattr(self, 'free_sources'): self.free_sources = FreeSources(self.root)
+        pending = getattr(self, 'free_futures', {}).pop(doi, None)
+        result = pending.result() if pending else self.free_sources.acquire(meta)
+        for record in result['events']: self.event(job, 'free_source', **record)
+        job['free_lookup'] = {k:v for k,v in result.items() if k in ('status','seconds','deadline_reached','events')}
+        self.event(job, 'free_lookup_finished', status=result['status'], seconds=result['seconds'])
+        if result['status'] == 'verified':
+            job.update({k:result[k] for k in ('pdf','source','source_url','source_version','validation')})
+            if result['source_version'] in ('acceptedVersion', 'submittedVersion'):
+                job['attachment_title'] = 'Author Manuscript ('+result['source_version']+')'
+            self.save(job)
+            return self.attach(job)
         job['status'] = 'needs_ablesci'
         self.save(job)
         self.event(job, 'needs_ablesci')
@@ -356,7 +333,7 @@ class Batch:
         else:
             selected_collection(self.collection)
             metadata = dict(sessionID=job['session'], parentItemID=job['connector_id'],
-                            title='Full Text PDF', url=job['source_url'])
+                            title=job.get('attachment_title', 'Full Text PDF'), url=job['source_url'])
             try:
                 raw, _, status = http(BASE + '/connector/saveAttachment', Path(job['pdf']).read_bytes(),
                     {'Content-Type': 'application/pdf', 'X-Metadata': json.dumps(metadata)}, 45)

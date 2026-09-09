@@ -3,6 +3,8 @@
 所有脚本均在本 skill 的 `scripts/`，不依赖任何论文项目。
 完整桌面流程当前支持 macOS；测试环境为 Zotero 9.0.6（中文菜单）和 Chrome。
 Python 3.10+；运行依赖见 requirements.txt，测试依赖见 requirements-dev.txt。
+免费来源的邮箱/API 设置、超时与重试说明见 [free-sources.md](free-sources.md)。
+设置一次后各批次自动读取；无须每次给模型传递密钥。
 
 ## 首次配置
 

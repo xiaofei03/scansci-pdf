@@ -28,9 +28,16 @@ user action. Do not weaken identity checks or change security settings to meet a
    tools; follow any project journal-screening rules before recommending papers.
 3. On a new device run `scripts/doctor.py`; install declared dependencies into a
    dedicated environment if needed. Do not repeatedly rediscover a working setup.
+   For free-source setup, authentication failures or efficiency work, read
+   [references/free-sources.md](references/free-sources.md). `free_sources.py --status`
+   reports presence only; `--configure` securely prompts for local settings.
 4. Run `scripts/batch.py` once for the batch:
    **Zotero full lookup → OA/publisher fallback → AbleSci → validation → managed PDF**.
    Reuse the same work directory to resume and preserve the cumulative point ledger.
+   Free fallback now uses bounded network workers, Unpaywall/OpenAlex discovery,
+   public publisher links and optional entitled Elsevier PDF retrieval. Credentials
+   are optional and never inherited from a Git repository. After changing credentials,
+   `--retry-free` explicitly retries missing jobs without existing AbleSci requests.
    For an explicitly requested unattended batch, use `--until-complete` and a
    suitable `--max-run-seconds`; observe the live process, not repeated fresh runs.
    Preflight checks the explicit writable `--downloads-dir`. Completed transfers
