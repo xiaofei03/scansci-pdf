@@ -1,17 +1,34 @@
-# Headless AbleSci helping mode — experimental
+# Scripted AbleSci helping mode — experimental
 
 ## Current evidence and limits (2026-09-09)
 
 `scripts/assist_bot.py` is a standalone Python 3.10+ Unix runner (macOS/Linux;
 uses `fcntl` for single-process ownership). It needs the existing pypdf dependency,
-but no Chrome, Apple Events, Zotero, GUI, or model loop at runtime. Windows is not
+but its default HTTP transport needs no Chrome, Apple Events, Zotero, GUI, or model loop. Windows is not
 supported by its current lock implementation. Installing the skill does not start it.
+
+Optional `--browser-session` reuses an existing logged-in Chrome tab on macOS using
+bounded same-origin fetches via Apple Events. It does not click, focus, navigate,
+read/export cookies, or change browser settings. Prefer it for agent-operated local
+tests when the user does not want repeated terminal logins. This mode needs Chrome
+running and existing Apple Events JavaScript permission; it is not headless/cloud mode.
 
 Verified so far:
 
 - User-provided terminal output confirms two successful pure-HTTP `login-check`
   runs with `logged_in: true`, `session_persisted: false`, `uploaded: 0`.
   This verifies login, not an active session available to another process or upload.
+- Agent-operated Chrome-session login and `/my/home` public account-ID verification
+  succeeded. A later user run's bare `TimeoutError` cannot be localized retrospectively:
+  the ledger was empty. Current direct HTTP login-page GET also succeeded, so an
+  enduring login-page outage was not established.
+- A bounded 6-minute Chrome-session run exited normally: 3 cycles, 9 candidates,
+  5 without sufficient sharing-license evidence and 4 ineligible. No timeout,
+  upload or points spending occurred. The 134-test regression suite passed.
+- A further 90-second run using automatic tab selection also exited normally.
+  Across both runs: 28 candidates, zero uploads. One PDF lookup ended at the run
+  deadline, not a site timeout. This now checkpoints `run_deadline` for immediate
+  next-run resumption instead of misclassifying it as a six-hour-backoff failure.
 - Real public waiting-list extraction, excluding pinned notices and already-uploaded
   list entries; real detail DOI/title/owner parsing.
 - Real AlphaFold PDF acquisition through Unpaywall/publisher, 12 pages, DOI/title/
@@ -54,8 +71,8 @@ the selected Python has pypdf for real downloading. `run`/`resolve`/`reconcile` 
 check the declared pypdf version before authentication/network work; use the skill's
 dedicated environment rather than assuming the system `python3` has dependencies.
 Once login-check has succeeded, proceed to a bounded `run`; do not ask the user to
-repeat login-only checks unnecessarily. Each independent run still needs its own
-in-memory login, because no session credentials are saved.
+repeat login-only checks unnecessarily. Pure HTTP runs need in-memory authentication;
+local Chrome-session runs use the browser's existing authenticated session.
 
 ```sh
 # Read-only list; creates a local ledger but does not log in/upload.
@@ -78,6 +95,11 @@ python3 scripts/assist_bot.py run --work-dir /private/path/assist-job \
   --own-user-id YOUR_PUBLIC_USER_ID --hours 0.1 --max-daily-uploads 1 \
   --allow-upload --prompt-login
 
+# Local agent-operated test: no repeated password entry, no screen clicking.
+python3 scripts/assist_bot.py run --work-dir /private/path/assist-job \
+  --own-user-id YOUR_PUBLIC_USER_ID --hours 0.1 --max-daily-uploads 1 \
+  --max-items-per-cycle 3 --allow-upload --browser-session
+
 python3 scripts/assist_bot.py status --work-dir /private/path/assist-job
 
 # Public read-only observations for existing uploads/uncertain writes; never reposts.
@@ -85,8 +107,12 @@ python3 scripts/assist_bot.py reconcile --work-dir /private/path/assist-job
 ```
 
 `YOUR_PUBLIC_USER_ID` is the `id` in your own public profile URL, not your nickname
-or email. It must be correct to exclude your own requests. Runtime login currently
-does not independently resolve that ID: verify it before a live run.
+or email. Before any live run the runner now requires the unique own-profile link
+on authenticated `/my/home` to match that ID. Wrong-account/ambiguous pages stop.
+Chrome mode pins one existing AbleSci tab by window/tab IDs; multiple homepage tabs
+are allowed. `--browser-tab-url` optionally selects a unique exact existing URL.
+Closing/navigating the pinned tab can stop the run; it never silently switches tabs
+mid-request. Browser mode and `--prompt-login` are mutually exclusive.
 
 Credentials: local `--prompt-login` keeps them in memory only. Cloud deployments
 may inject `ABLESCI_USERNAME`/`ABLESCI_PASSWORD` into the process from a secret
@@ -111,11 +137,18 @@ full-text subscriptions. Institutional access does not by itself authorize shari
   10 candidates/cycle and 10 attempted uploads/UTC day. These are conservative local
   controls, **not verified site quotas**. A stop signal or elapsed run deadline stops
   new work. Active site network calls can take their bounded 25/60 s to return.
+- Safe request-phase/method/route/timing logs are emitted and appended to private
+  `runtime.jsonl` in the work directory; request bodies, cookies, CSRF and upload
+  tickets are excluded. Read timeouts retry once; write timeouts never retry.
+  Browser fetches have a 30 s abort timer and a bounded polling window. An uncertain
+  upload remains reserved in the ledger even if the browser context disappears.
 - Per-paper discovery/validation runs in a child process with a 120 s ceiling.
   Cached downloaded files remain for revalidation. Failed PDF lookups may retry
   after six hours; rights/identity/schema review states are not blindly retried.
   Stop/deadline termination reaps the child; a non-responsive child is killed after
   a three-second graceful termination window. No new lookup begins after stopping.
+  With less than five seconds of run time left, defer the candidate without starting
+  a lookup. `run_deadline` jobs resume next invocation, without the failure cooldown.
 - Saved ready candidates are served before new list entries in live mode. They are
   rechecked against the current request and freshly resolved/revalidated using the
   existing file cache. Dry runs do not repeatedly process already-ready entries.

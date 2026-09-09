@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless AbleSci helping client. No browser, cookies on disk, or Zotero writes.
+"""AbleSci helping client. HTTP default; optional local Chrome session transport.
 
 Upload handshake observed in the site's SimpleUpload form on 2026-09-09.
 Unknown writes never auto-retry. Run scan first; live mode requires explicit flags.
@@ -33,11 +33,30 @@ import uuid
 
 BASE = 'https://www.ablesci.com'
 STOP = threading.Event()
+TRACE = {}
+TRACE_FILE = None
 VOID = set('area base br col embed hr img input link meta param source track wbr'.split())
 
 
 class Halt(RuntimeError):
     """An authentication, schema or uncertain-write condition requiring review."""
+
+
+def progress(stage, **facts):
+    TRACE.clear()
+    TRACE.update(stage=stage, **facts)
+    log_event(dict(at=time.time(), **TRACE))
+
+
+def log_event(event):
+    line = json.dumps(event)
+    print(line, file=sys.stderr, flush=True)
+    if TRACE_FILE is not None:
+        try:
+            with TRACE_FILE.open('a', encoding='utf-8') as stream:
+                stream.write(line + '\n')
+        except OSError:
+            pass  # Never hide the real network failure behind a logging failure.
 
 
 class Node:
@@ -178,6 +197,24 @@ class Site:
         self.interval, self.last = interval, 0.0
 
     def call(self, path, fields=None):
+        route = urlparse.urlsplit(path).path
+        method = 'GET' if fields is None else 'POST'
+        for attempt in range(1, 3 if fields is None else 2):
+            progress('site_request', method=method, route=route, attempt=attempt)
+            started = time.monotonic()
+            try:
+                result = self._call_once(path, fields)
+            except (TimeoutError, urllib.error.URLError) as error:
+                timeout = isinstance(error, TimeoutError) or isinstance(getattr(error, 'reason', None), TimeoutError)
+                if timeout and fields is None and attempt == 1:
+                    progress('read_timeout_retry', method=method, route=route)
+                    continue
+                raise Halt('site_timeout' if timeout else 'site_transport_error') from None
+            progress('site_response', method=method, route=route,
+                     seconds=round(time.monotonic() - started, 2))
+            return result
+
+    def _call_once(self, path, fields=None):
         if not path.startswith('/') or path.startswith('//'):
             raise Halt('unexpected_site_path')
         if STOP.wait(max(0, self.interval - (time.monotonic() - self.last))):
@@ -221,6 +258,168 @@ class Site:
 
     def detail(self, ident):
         return detail_page(self.call('/assist/detail?id=' + ident), ident)
+
+    def confirm_account(self, expected):
+        root = Page(self.call('/my/home')).root
+        ids = set()
+        for a in root.all('a'):
+            p = urlparse.urlsplit(urlparse.urljoin(BASE, a.attrs.get('href', '')))
+            if p.netloc == 'www.ablesci.com' and p.path == '/user/home':
+                ids.update(urlparse.parse_qs(p.query).get('id', []))
+        if ids != {expected}:
+            raise Halt('logged_in_account_id_not_confirmed')
+        progress('account_confirmed', own_user_id=expected)
+
+
+class BrowserSite(Site):
+    """Same-origin HTTP in an existing logged-in tab, no clicks/cookie extraction.
+
+    Uses Apple Events only to execute bounded fetches. The browser keeps cookies.
+    Does not open/navigate tabs, change browser preferences or retry POSTs.
+    """
+    def __init__(self, tab_url=None, interval=3):
+        self.interval, self.last = interval, 0.0
+        self.tab_url, self.target = tab_url, None
+        p = urlparse.urlsplit(tab_url or BASE + '/')
+        if p.scheme != 'https' or p.netloc != 'www.ablesci.com' or p.username or p.password:
+            raise Halt('browser_tab_must_be_ablesci_https')
+        if sys.platform != 'darwin':
+            raise Halt('browser_session_requires_macos')
+
+    def chrome(self, javascript):
+        script = '''on run argv
+tell application "Google Chrome"
+set matches to {}
+repeat with w in windows
+repeat with t in tabs of w
+if URL of t starts with "https://www.ablesci.com/" then
+if (item 2 of argv) is not "" then
+if (id of w as text) is (item 2 of argv) and (id of t as text) is (item 3 of argv) then set end of matches to {id of w, id of t}
+else if (item 1 of argv) is "" or URL of t is (item 1 of argv) then
+set end of matches to {id of w, id of t}
+end if
+end if
+end repeat
+end repeat
+if (count of matches) is 0 then return "__TAB_NOT_UNIQUE__"
+if (item 1 of argv) is not "" and (item 2 of argv) is "" and (count of matches) is not 1 then return "__TAB_NOT_UNIQUE__"
+set targetIds to item 1 of matches
+repeat with w in windows
+if (id of w as text) is (item 1 of targetIds as text) then
+repeat with t in tabs of w
+if (id of t as text) is (item 2 of targetIds as text) then
+set resultText to execute t javascript (item 4 of argv)
+return (id of w as text) & linefeed & (id of t as text) & linefeed & resultText
+end if
+end repeat
+end if
+end repeat
+return "__TAB_NOT_UNIQUE__"
+end tell
+end run'''
+        try:
+            output = subprocess.run(['osascript', '-e', script, self.tab_url or '',
+                                     *(self.target or ('', '')), javascript],
+                                    capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            raise Halt('browser_command_timeout') from None
+        if output.returncode:
+            # AppleScript errors can echo JS containing CSRF: never expose stderr.
+            raise Halt('browser_automation_unavailable')
+        if output.stdout.strip() == '__TAB_NOT_UNIQUE__':
+            raise Halt('browser_tab_missing_or_ambiguous')
+        parts = output.stdout.strip().split('\n', 2)
+        if len(parts) != 3 or not all(re.fullmatch(r'\d+', n) for n in parts[:2]):
+            raise Halt('browser_command_schema_changed')
+        self.target = tuple(parts[:2])
+        return parts[2]
+
+    @staticmethod
+    def check_path(path, fields):
+        p = urlparse.urlsplit(path)
+        if p.scheme or p.netloc or p.fragment or not path.startswith('/') or path.startswith('//'):
+            raise Halt('unexpected_site_path')
+        allowed = ('/', '/assist/index', '/assist/detail', '/my/assist-give', '/my/home')
+        if (fields is None and p.path not in allowed) or (fields is not None and p.path != '/assist/upload-request'):
+            raise Halt('browser_route_not_allowed')
+
+    def _call_once(self, path, fields=None):
+        self.check_path(path, fields)
+        if STOP.wait(max(0, self.interval - (time.monotonic() - self.last))):
+            raise Halt('stopped')
+        self.last = time.monotonic()
+        key = '__scansci_http_' + uuid.uuid4().hex
+        config = json.dumps({'key': key, 'path': path, 'fields': fields})
+        js = '''(() => {
+const c = CONFIG;
+if (location.origin !== "https://www.ablesci.com") return "wrong_origin";
+const ac = new AbortController();
+const slot = window[c.key] = {done:false, cancel:() => ac.abort()};
+const timer = setTimeout(() => ac.abort(), 30000);
+(async () => {
+try {
+const opts = {credentials:"same-origin", redirect:"error", signal:ac.signal};
+if (c.fields !== null) Object.assign(opts,{method:"POST", body:new URLSearchParams(c.fields),
+headers:{"Content-Type":"application/x-www-form-urlencoded", "X-Requested-With":"XMLHttpRequest"}});
+const r = await fetch(c.path, opts);
+if (!r.ok) {slot.error="site_http_"+r.status; return;}
+if (r.headers.get("cf-mitigated") === "challenge") {slot.error="browser_verification_required"; return;}
+const reader=r.body.getReader(), chunks=[]; let size=0;
+while(true){const part=await reader.read();if(part.done)break;
+size+=part.value.length;if(size>4194304){await reader.cancel();slot.error="response_too_large";return;}
+chunks.push(part.value);}
+const bytes=new Uint8Array(size);let offset=0;
+for(const part of chunks){bytes.set(part,offset);offset+=part.length;}
+slot.text=new TextDecoder().decode(bytes);
+} catch(e) {slot.error=e.name === "AbortError" ? "timeout" : "browser_fetch_failed";}
+finally {clearTimeout(timer); slot.done=true;}
+})();return "started";
+})()'''.replace('CONFIG', config)
+        if self.chrome(js) != 'started':
+            raise Halt('browser_origin_changed')
+        end = time.monotonic() + 40
+        try:
+            while time.monotonic() < end:
+                if STOP.wait(0.4):
+                    raise Halt('stopped')
+                raw = self.chrome('JSON.stringify((() => {const s=window[' + json.dumps(key) +
+                                  '];return s ? {done:s.done,error:s.error,text:s.text} : {error:"browser_context_lost",done:true};})())')
+                try:
+                    result = json.loads(raw)
+                except ValueError:
+                    raise Halt('browser_context_lost') from None
+                if not result.get('done'):
+                    continue
+                if result.get('error') == 'timeout':
+                    raise TimeoutError()
+                if result.get('error'):
+                    raise Halt(result['error'])
+                text = result.get('text', '')
+                if '<title>Just a moment' in text or 'cf-chl-' in text:
+                    raise Halt('browser_verification_required')
+                if fields is None:
+                    return text
+                try:
+                    data = json.loads(text)
+                    if not isinstance(data, dict) or type(data.get('code')) is not int:
+                        raise ValueError()
+                    return data
+                except ValueError:
+                    raise Halt('unexpected_json_response') from None
+            raise TimeoutError()
+        finally:
+            try:
+                self.chrome('(() => {const k=' + json.dumps(key) +
+                            ';window[k]?.cancel();delete window[k];return "cleared";})()')
+            except Halt:
+                pass  # Do not conceal original failure or retry an uncertain POST.
+
+    def confirm_session(self):
+        html = self.call('/my/assist-give')
+        root = Page(html).root
+        if not any(urlparse.urljoin(BASE, a.attrs.get('href', '')) == BASE + '/site/logout'
+                   for a in root.all('a')) or 'able-head-user-guest' in html:
+            raise Halt('browser_login_required')
 
 
 class Ledger:
@@ -268,7 +467,7 @@ class Ledger:
             if previous is None:
                 return True
             state, updated = previous
-            return ((live and state == 'ready') or
+            return (state == 'run_deadline' or (live and state == 'ready') or
                     (state in ('no_verified_pdf', 'lookup_timeout', 'lookup_failed') and now - updated >= 21600))
 
         ordered = [{'id': ident} for ident, _, _ in saved if runnable(ident)] + fresh
@@ -287,7 +486,7 @@ def lookup_child(root, doi, deadline):
     if STOP.is_set():
         raise Halt('stopped')
     if time.monotonic() >= end:
-        return {'status': 'lookup_timeout'}
+        return {'status': 'run_deadline' if time.monotonic() >= deadline else 'lookup_timeout'}
     child_env = {k: v for k, v in os.environ.items() if k not in ('ABLESCI_PASSWORD', 'ABLESCI_USERNAME')}
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=child_env)
     try:
@@ -296,13 +495,20 @@ def lookup_child(root, doi, deadline):
                 raise Halt('stopped')
             remaining = end - time.monotonic()
             if remaining <= 0:
-                return {'status': 'lookup_timeout'}
+                return {'status': 'run_deadline' if time.monotonic() >= deadline else 'lookup_timeout'}
             try:
-                stdout, _ = child.communicate(timeout=min(0.5, remaining))
+                stdout, stderr = child.communicate(timeout=min(0.5, remaining))
             except subprocess.TimeoutExpired:
                 continue
             if child.returncode != 0:
-                return {'status': 'lookup_failed'}
+                reason = 'child_process_failed'
+                try:
+                    candidate = json.loads(stderr.strip().splitlines()[-1]).get('reason', '')
+                    if isinstance(candidate, str) and re.fullmatch(r'[A-Za-z0-9_]{1,100}', candidate):
+                        reason = candidate
+                except (ValueError, IndexError, AttributeError):
+                    pass
+                return {'status': 'lookup_failed', 'reason': reason}
             try:
                 result = json.loads(stdout)
                 if not isinstance(result, dict) or not isinstance(result.get('status'), str):
@@ -344,6 +550,10 @@ def reconcile(site, ledger, limit=10):
 def authenticate(site, prompt):
     # Pop even in prompt mode so an inherited secret cannot leak into child jobs.
     supplied = os.environ.pop('ABLESCI_PASSWORD', '')
+    if isinstance(site, BrowserSite):
+        site.confirm_session()
+        progress('authenticated', transport='chrome_session', session_exported=False)
+        return
     if prompt and not sys.stdin.isatty():
         raise Halt('login_prompt_requires_private_interactive_terminal')
     username = input('AbleSci email/username: ') if prompt else os.environ.get('ABLESCI_USERNAME', '')
@@ -351,6 +561,7 @@ def authenticate(site, prompt):
     if not username or not password:
         raise Halt('credentials_required_use_local_prompt_or_secret_injection')
     site.login(username, password)
+    progress('authenticated', transport='http', session_persisted=False)
 
 
 def resolve(root, doi):
@@ -440,6 +651,7 @@ def upload(site, ledger, item, artifact, own_id, allowed_hosts):
                   'x:filename': d['filename'], 'x:assist_id': d['assist_id'], 'x:user_id': d['user_id']}
         body, content_type = multipart(fields, filename, raw)
         # Separate opener: no website cookies/password/CSRF sent to storage host.
+        progress('storage_upload', request_id=ident, host=urlparse.urlsplit(host).hostname)
         with request.build_opener(NoRedirect()).open(request.Request(host, data=body,
                 headers={'Content-Type': content_type, 'User-Agent': 'ScansciAssist/0.1'}), timeout=60) as response:
             uploaded = json.loads(response.read(1024 * 1024))
@@ -449,6 +661,7 @@ def upload(site, ledger, item, artifact, own_id, allowed_hosts):
         raise Halt('upload_rejected_needs_review')
     # The server acknowledged the upload. Do not claim acceptance or points yet.
     ledger.save(ident, 'uploaded', record)
+    progress('upload_acknowledged', request_id=ident, acceptance='not_verified')
 
 
 def finite_positive(value):
@@ -474,6 +687,7 @@ def require_pdf_runtime():
 
 
 def main():
+    global TRACE_FILE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=['scan', 'run', 'status', 'resolve', 'login-check', 'reconcile'])
     parser.add_argument('--work-dir', required=True, type=Path)
@@ -486,7 +700,11 @@ def main():
     parser.add_argument('--allow-upload', action='store_true')
     parser.add_argument('--upload-host', action='append', default=[])
     parser.add_argument('--prompt-login', action='store_true')
+    parser.add_argument('--browser-session', action='store_true', help='Use existing Chrome login on macOS, no clicks or cookie export')
+    parser.add_argument('--browser-tab-url', help='Optional exact existing AbleSci tab URL; otherwise pin the first existing AbleSci tab')
     args = parser.parse_args()
+    if args.browser_session and args.prompt_login:
+        parser.error('--browser-session and --prompt-login are mutually exclusive')
     os.umask(0o077)
     if args.max_daily_uploads < 1 or args.max_items_per_cycle < 1 or args.poll_seconds < 30:
         parser.error('positive limits and poll interval >=30 seconds required')
@@ -501,9 +719,11 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: STOP.set())
     ledger = Ledger(args.work_dir)
+    if args.mode in ('run', 'login-check', 'reconcile'):
+        TRACE_FILE = ledger.root / 'runtime.jsonl'
     if args.mode == 'status':
         print(json.dumps(ledger.summary())); return
-    site = Site()
+    site = BrowserSite(args.browser_tab_url) if args.browser_session else Site()
     if args.mode == 'login-check':
         authenticate(site, args.prompt_login)
         print(json.dumps({'logged_in': True, 'session_persisted': False, 'uploaded': 0})); return
@@ -522,6 +742,7 @@ def main():
         print(json.dumps(reconcile(site, ledger, args.max_items_per_cycle))); return
     if args.allow_upload:
         authenticate(site, args.prompt_login)
+        site.confirm_account(args.own_user_id)
     end = time.monotonic() + args.hours * 3600
     while time.monotonic() < end and not STOP.is_set():
         if args.allow_upload:
@@ -537,13 +758,22 @@ def main():
             item = site.detail(entry['id'])
             if not eligible(item, args.own_user_id):
                 ledger.save(entry['id'], 'skipped', item); continue
+            if end - time.monotonic() < 5:
+                ledger.save(entry['id'], 'run_deadline', dict(item=item))
+                break
+            progress('pdf_lookup', request_id=entry['id'], doi=item['doi'])
             artifact = lookup_child(ledger.root / 'papers', item['doi'], end)
             ledger.save(entry['id'], artifact['status'], dict(item=item, artifact=artifact))
+            progress('pdf_result', request_id=entry['id'], result=artifact['status'])
+            if artifact['status'] == 'run_deadline':
+                break
             if artifact['status'] == 'ready' and args.allow_upload:
                 if ledger.attempted_today() >= args.max_daily_uploads:
                     break
                 upload(site, ledger, item, artifact, args.own_user_id, set(args.upload_host))
         print(json.dumps({'elapsed_seconds': round(time.monotonic() - started, 2), 'counts': ledger.summary()}), flush=True)
+        if args.allow_upload and ledger.attempted_today() >= args.max_daily_uploads:
+            break
         STOP.wait(min(args.poll_seconds, max(0, end - time.monotonic())))
     print(json.dumps({'stopped': True, 'counts': ledger.summary()}))
 
@@ -553,5 +783,6 @@ if __name__ == '__main__':
         main()
     except Exception as error:
         # Do not print arbitrary response bodies, signed tickets, passwords or URLs.
-        print(json.dumps({'status': 'needs_review', 'reason': str(error) if isinstance(error, Halt) else type(error).__name__}), file=sys.stderr)
+        log_event({'at': time.time(), 'status': 'needs_review',
+                   'reason': str(error) if isinstance(error, Halt) else type(error).__name__, 'context': dict(TRACE)})
         sys.exit(2)

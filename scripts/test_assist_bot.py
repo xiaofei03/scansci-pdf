@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from assist_bot import (Halt, Ledger, detail_page, eligible, multipart, request_id,
                         safe_host, scan_page, upload, STOP, Site, lookup_child, reconcile, authenticate,
-                        require_pdf_runtime)
+                        require_pdf_runtime, BrowserSite)
 
 
 def detail_html(state='waiting', note='', owner='OTHER', doi='10.1000/test'):
@@ -27,6 +27,90 @@ def detail_html(state='waiting', note='', owner='OTHER', doi='10.1000/test'):
 
 
 class BotTests(unittest.TestCase):
+    def test_read_timeout_retries_once_with_safe_context(self):
+        from unittest.mock import MagicMock
+        site = Site(interval=0)
+        site._call_once = MagicMock(side_effect=[TimeoutError('secret-body'), 'ok'])
+        with patch('assist_bot.progress') as event:
+            self.assertEqual(site.call('/assist/detail?id=ABC123'), 'ok')
+        self.assertEqual(site._call_once.call_count, 2)
+        self.assertNotIn('secret-body', str(event.call_args_list))
+
+    def test_post_timeout_never_retries_or_prints_fields(self):
+        from unittest.mock import MagicMock
+        site = Site(interval=0)
+        site._call_once = MagicMock(side_effect=TimeoutError('secret-body'))
+        with patch('assist_bot.progress') as event:
+            with self.assertRaisesRegex(Halt, '^site_timeout$'):
+                site.call('/assist/upload-request?t=1', {'_csrf': 'private-token'})
+        self.assertEqual(site._call_once.call_count, 1)
+        self.assertNotIn('private-token', str(event.call_args_list))
+
+    def test_browser_route_allowlist(self):
+        for path, fields in [('/site/logout', None), ('//evil.example/', None),
+                             ('https://www.ablesci.com/my/home', None),
+                             ('/assist/create', {}), ('/assist/detail?id=ABC123', {}),
+                             ('/assist/upload-request', None)]:
+            with self.assertRaises(Halt):
+                BrowserSite.check_path(path, fields)
+        BrowserSite.check_path('/my/home', None)
+        BrowserSite.check_path('/assist/upload-request?t=1', {})
+
+    def test_browser_session_needs_no_password_prompt(self):
+        with patch('assist_bot.sys.platform', 'darwin'):
+            site = BrowserSite()
+        with patch.object(site, 'confirm_session') as confirm, patch('builtins.input') as prompt:
+            authenticate(site, False)
+        confirm.assert_called_once()
+        prompt.assert_not_called()
+
+    def test_account_identity_must_match_before_upload(self):
+        from unittest.mock import MagicMock
+        site = Site(interval=0)
+        site.call = MagicMock(return_value='<a href="/user/home?id=OTHER">My public profile</a>')
+        with self.assertRaisesRegex(Halt, 'account_id_not_confirmed'):
+            site.confirm_account('ME')
+        site.call.return_value = '<a href="/user/home?id=ME">My public profile</a>'
+        site.confirm_account('ME')
+
+    def test_browser_response_and_cleanup_without_navigation(self):
+        from unittest.mock import MagicMock
+        with patch('assist_bot.sys.platform', 'darwin'):
+            site = BrowserSite(interval=0)
+        site.chrome = MagicMock(side_effect=['started', json.dumps({'done': True, 'text': 'article HTML'}), 'cleared'])
+        with patch('assist_bot.STOP.wait', return_value=False):
+            self.assertEqual(site.call('/assist/detail?id=ABC123'), 'article HTML')
+        scripts = [c.args[0] for c in site.chrome.call_args_list]
+        self.assertIn('credentials:"same-origin"', scripts[0])
+        self.assertIn('delete window[k]', scripts[-1])
+        for script in scripts:
+            for forbidden in ('document.cookie', '.click(', 'location.href=', 'window.open('):
+                self.assertNotIn(forbidden, script)
+
+    def test_browser_pins_tab_ids_and_redacts_command_errors(self):
+        from types import SimpleNamespace
+        with patch('assist_bot.sys.platform', 'darwin'):
+            site = BrowserSite()
+        with patch('assist_bot.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='77\n88\nstarted\n')) as run:
+            self.assertEqual(site.chrome('test-js'), 'started')
+            self.assertEqual(site.target, ('77', '88'))
+            site.chrome('poll-js')
+            self.assertEqual(run.call_args.args[0][-3:], ['77', '88', 'poll-js'])
+        with patch('assist_bot.subprocess.run', return_value=SimpleNamespace(returncode=1, stdout='', stderr='secret-token')):
+            with self.assertRaisesRegex(Halt, '^browser_automation_unavailable$'):
+                site.chrome('poll-js')
+
+    def test_browser_post_timeout_cleans_up_and_never_redispatches(self):
+        from unittest.mock import MagicMock
+        with patch('assist_bot.sys.platform', 'darwin'):
+            site = BrowserSite(interval=0)
+        site.chrome = MagicMock(side_effect=['started', json.dumps({'done': True, 'error': 'timeout'}), 'cleared'])
+        with patch('assist_bot.STOP.wait', return_value=False), patch('assist_bot.progress'):
+            with self.assertRaisesRegex(Halt, '^site_timeout$'):
+                site.call('/assist/upload-request', {'_csrf': 'private-token'})
+        self.assertEqual(site.chrome.call_count, 3)
+        self.assertIn('delete window[k]', site.chrome.call_args.args[0])
+
     def test_missing_pdf_runtime_fails_before_login(self):
         with patch('assist_bot.importlib.import_module', side_effect=ImportError):
             with self.assertRaisesRegex(Halt, 'pdf_runtime_missing'):
@@ -64,6 +148,8 @@ class BotTests(unittest.TestCase):
             now = time.time()
             self.assertEqual(ledger.candidates([], True, 10, now), [])
             self.assertEqual({r['id'] for r in ledger.candidates([], True, 10, now + 21601)}, {'FAILED', 'TIMEOUT'})
+            ledger.save('DEFER1', 'run_deadline', {})
+            self.assertEqual(ledger.candidates([], True, 10, now), [{'id': 'DEFER1'}])
             ledger.db.close()
 
     def test_login_requires_positive_authenticated_page_evidence(self):
@@ -112,7 +198,7 @@ class BotTests(unittest.TestCase):
             return child
         with patch('assist_bot.subprocess.Popen', side_effect=spawn):
             result = lookup_child(Path('/unused'), '10.1000/test', time.monotonic() + 0.2)
-        self.assertEqual(result['status'], 'lookup_timeout')
+        self.assertEqual(result['status'], 'run_deadline')
         self.assertIsNotNone(children[0].poll())
 
     def test_reconcile_is_read_only_and_does_not_invent_acceptance(self):
