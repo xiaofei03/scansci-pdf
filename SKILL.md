@@ -31,6 +31,9 @@ user action. Do not weaken identity checks or change security settings to meet a
    For free-source setup, authentication failures or efficiency work, read
    [references/free-sources.md](references/free-sources.md). `free_sources.py --status`
    reports presence only; `--configure` securely prompts for local settings.
+   TLS record errors have one verified TLS 1.2 compatibility retry; certificate
+   failures are not bypassed. Explicit 403 browser challenges skip the host and
+   continue other sources; they are not reported as missing bibliographic records.
 4. Run `scripts/batch.py` once for the batch:
    **Zotero full lookup → OA/publisher fallback → AbleSci → validation → managed PDF**.
    Reuse the same work directory to resume and preserve the cumulative point ledger.

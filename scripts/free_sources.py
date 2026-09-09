@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -84,12 +85,14 @@ class SafeRedirect(request.HTTPRedirectHandler):
         return result
 
 
-def download_bytes(url, headers, deadline, limit, timeout=12):
+def _download_bytes(url, headers, deadline, limit, timeout, context=None):
     public_url(url)
     remaining = deadline - time.monotonic()
     if remaining <= 0: raise TimeoutError('lookup_deadline')
     req = request.Request(url, headers={'User-Agent': 'ScansciPDF/0.2 (personal research)', **headers})
-    with request.build_opener(SafeRedirect()).open(req, timeout=min(timeout, remaining)) as r:
+    handlers = [SafeRedirect()]
+    if context is not None: handlers.append(request.HTTPSHandler(context=context))
+    with request.build_opener(*handlers).open(req, timeout=min(timeout, remaining)) as r:
         parts, count = [], 0
         while True:
             if time.monotonic() >= deadline: raise TimeoutError('lookup_deadline')
@@ -99,6 +102,31 @@ def download_bytes(url, headers, deadline, limit, timeout=12):
             if count > limit: raise ValueError('response_too_large')
             parts.append(chunk)
         return b''.join(parts), r.geturl()
+
+
+def tls_record_failure(error):
+    """Only the observed record-protocol failure; never a certificate/identity error."""
+    cause = getattr(error, 'reason', None)
+    cause = cause if isinstance(cause, BaseException) else error
+    return (isinstance(cause, ssl.SSLError) and
+            not isinstance(cause, ssl.SSLCertVerificationError) and
+            'record layer failure' in str(cause).lower())
+
+
+def download_bytes(url, headers, deadline, limit, timeout=12, transport_events=None):
+    try:
+        return _download_bytes(url, headers, deadline, limit, timeout)
+    except (ssl.SSLError, urllib.error.URLError) as error:
+        if not tls_record_failure(error) or time.monotonic() >= deadline: raise
+        # Narrow per-request compatibility retry, no global TLS/proxy/CA change.
+        # Keep system trust roots, certificate verification and hostname checking.
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.maximum_version = ssl.TLSVersion.TLSv1_2
+        if transport_events is not None:
+            transport_events.append(dict(status='tls12_retry', reason='tls_record_error'))
+        # Discard any partial bytes. Same deadline/limits and safe redirect handler.
+        return _download_bytes(url, headers, deadline, limit, timeout, context=context)
 
 
 def identity(value):
@@ -121,19 +149,25 @@ class FreeSources:
         self.seconds = seconds
         self.lock = threading.Lock()
         self.host_locks, self.cooldowns = {}, {}
+        self.challenge_hosts = set()
 
     def fetch(self, source, url, headers, deadline, events, pdf=False):
         host = urlparse.urlsplit(url).hostname or ''
         with self.lock:
             semaphore = self.host_locks.setdefault(host, threading.BoundedSemaphore(2))
             cooldown = self.cooldowns.get(host, 0)
+            challenged = host in self.challenge_hosts
+        if challenged:
+            events.append(dict(source=source, status='challenge_host_skipped', host=host)); return None
         if cooldown > time.monotonic():
             events.append(dict(source=source, status='host_cooldown', host=host)); return None
         start = time.monotonic()
         if not semaphore.acquire(timeout=max(0, deadline-start)):
             events.append(dict(source=source, status='deadline')); return None
+        transport_events = []
         try:
-            data, final = download_bytes(url, headers, deadline, 60*1024*1024 if pdf else 4*1024*1024)
+            data, final = download_bytes(url, headers, deadline, 60*1024*1024 if pdf else 4*1024*1024,
+                                         transport_events=transport_events)
             events.append(dict(source=source, status='received', host=host, bytes=len(data),
                                seconds=round(time.monotonic()-start, 3), phase='pdf' if pdf else 'discovery'))
             return data, final
@@ -144,11 +178,26 @@ class FreeSources:
                       ('server_error' if code and code >= 500 else
                        'timeout' if isinstance(e, (TimeoutError, socket.timeout)) or
                        isinstance(getattr(e, 'reason', None), (TimeoutError, socket.timeout)) else 'network_or_format_error'))
+            cause = getattr(e, 'reason', None)
+            cause = cause if isinstance(cause, BaseException) else e
+            detail = {}
+            if isinstance(cause, ssl.SSLCertVerificationError):
+                reason = 'tls_certificate_error'
+                detail['certificate_verify_code'] = cause.verify_code
+            elif isinstance(cause, ssl.SSLError):
+                reason = 'tls_record_error' if tls_record_failure(cause) else 'tls_handshake_error'
+            if code == 403 and getattr(e, 'headers', None) and e.headers.get('cf-mitigated', '').lower() == 'challenge':
+                reason = 'browser_verification_required'
+                with self.lock:
+                    self.challenge_hosts.add(host)
+                    # On redirected requests, avoid mislabelling only the origin host.
+                    final_host = urlparse.urlsplit(e.geturl()).hostname
+                    if final_host: self.challenge_hosts.add(final_host)
+                detail['action'] = 'use_other_source_or_user_verification'
             if code in (401, 429, 503):
                 raw = e.headers.get('Retry-After', '') if getattr(e, 'headers', None) else ''
                 delay = min(300, max(15, int(raw))) if raw.isdigit() else 60
                 with self.lock: self.cooldowns[host] = time.monotonic()+delay
-            detail = {}
             if source == 'elsevier_api' and isinstance(e, urllib.error.HTTPError):
                 try:
                     raw = e.read(8192)
@@ -169,7 +218,9 @@ class FreeSources:
                                error_type=type(e).__name__, reason_type=type(getattr(e, 'reason', None)).__name__,
                                seconds=round(time.monotonic()-start, 3)))
             return None
-        finally: semaphore.release()
+        finally:
+            events.extend(dict(source=source, host=host, **event) for event in transport_events)
+            semaphore.release()
 
     def provider(self, source, meta, deadline):
         events, candidates = [], []

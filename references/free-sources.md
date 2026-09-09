@@ -33,6 +33,32 @@ Source version labels are recorded. Known accepted/submitted versions get an Aut
 Manuscript attachment title. A shorter-than-published copy still needs the existing
 hash-bound user-approved version review; new sources do not loosen validation.
 
+## TLS and HTTP 403 recovery
+
+- A reproducible `[SSL] record layer failure` at an OA repository can trigger one
+  fresh TLS 1.2 request. It retains certificate verification, hostname checking,
+  system trust roots, redirect protections, byte limits and the original deadline.
+  Partial bytes are discarded. This is per-request compatibility, not a global
+  downgrade; there is no TLS 1.0/1.1, custom insecure CA, proxy change or `verify=False`.
+- Certificate verification failures never trigger this fallback. Logs distinguish
+  `tls_certificate_error` (with verification code), `tls_record_error` and other
+  `tls_handshake_error` outcomes. Unresolved trust errors require diagnosis, not
+  silently trusting an intercepted certificate. Other TLS errors are not retried.
+- HTTP 403 plus explicit `cf-mitigated: challenge` is
+  `browser_verification_required`. The engine skips further requests to that host
+  for its lifetime and continues independent sources. It does not fake browser
+  fingerprints, rotate IPs, extract cookies or solve the challenge. Ordinary 403
+  remains `access_denied`; it is not proof of either a paywall or a bad API key.
+- Live regression on 2026-09-09: SMJ DOI `10.1002/smj.70041` failed with the
+  default TLS path, but its indexed DAU repository copy downloaded via the secure
+  TLS 1.2 retry (28 pages; DOI/title/first-author/readability checks passed).
+  This demonstrates an effective compatibility fix on the tested network, not
+  whether the underlying defect is in the server, proxy or TLS implementation.
+  Wiley/OUP Cloudflare challenges remain unresolved. Three fixed samples retested
+  without cached PDFs yielded 2 verified files in 10.252 s for the free-source
+  phase, excluding metadata preparation and Zotero import. No universal rate or
+  timing guarantee follows from this small test.
+
 ## One-time configuration
 
 No new email account is necessary. An existing real research email can be used.

@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import ssl
 from pathlib import Path
 import tempfile
 import time
@@ -10,7 +11,7 @@ import urllib.error
 import urllib.request
 
 from reportlab.pdfgen import canvas
-from free_sources import FreeSources, SafeRedirect, public_url, settings
+from free_sources import FreeSources, SafeRedirect, public_url, settings, download_bytes
 
 
 class FreeTests(unittest.TestCase):
@@ -145,6 +146,92 @@ class FreeTests(unittest.TestCase):
              patch.object(self.engine,'fetch',return_value=(self.pdf(),'https://example.org/x.pdf')):
             self.assertEqual(self.engine.acquire(self.meta)['status'],'verified')
         self.assertEqual(sorted(calls),['openalex','unpaywall'])
+
+    def test_tls_record_retry_keeps_verification_and_deadline(self):
+        failure=ssl.SSLError(1, '[SSL] record layer failure')
+        events=[]; deadline=time.monotonic()+3
+        with patch('free_sources._download_bytes',side_effect=[failure,(b'%PDF-ok','https://example.org/a')]) as call:
+            result=download_bytes('https://example.org/a',{},deadline,100,transport_events=events)
+        self.assertEqual(result[0],b'%PDF-ok'); self.assertEqual(call.call_count,2)
+        ctx=call.call_args.kwargs['context']
+        self.assertEqual(ctx.verify_mode,ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
+        self.assertEqual(ctx.minimum_version,ssl.TLSVersion.TLSv1_2)
+        self.assertEqual(ctx.maximum_version,ssl.TLSVersion.TLSv1_2)
+        self.assertEqual(call.call_args.args[2],deadline)
+        self.assertEqual(call.call_args.args[3],100)
+        self.assertEqual(events,[dict(status='tls12_retry',reason='tls_record_error')])
+
+    def test_tls_certificate_error_never_retries(self):
+        # Even misleading wording cannot turn a verification error into a retry.
+        failure=ssl.SSLCertVerificationError(1,'record layer failure')
+        with patch('free_sources._download_bytes',side_effect=failure) as call:
+            with self.assertRaises(ssl.SSLCertVerificationError):
+                download_bytes('https://example.org/a',{},time.monotonic()+3,100)
+        self.assertEqual(call.call_count,1)
+
+    def test_tls_retry_once_only(self):
+        failure=ssl.SSLError(1,'[SSL] record layer failure')
+        with patch('free_sources._download_bytes',side_effect=failure) as call:
+            with self.assertRaises(ssl.SSLError):
+                download_bytes('https://example.org/a',{},time.monotonic()+3,100)
+        self.assertEqual(call.call_count,2)
+
+    def test_tls_generic_failure_never_changes_protocol(self):
+        failure=urllib.error.URLError(ssl.SSLError(1,'handshake failure'))
+        with patch('free_sources._download_bytes',side_effect=failure) as call:
+            with self.assertRaises(urllib.error.URLError):
+                download_bytes('https://example.org/a',{},time.monotonic()+3,100)
+        self.assertEqual(call.call_count,1)
+
+    def test_tls_wrapped_record_failure_can_retry(self):
+        failure=urllib.error.URLError(ssl.SSLError(1,'record layer failure'))
+        with patch('free_sources._download_bytes',side_effect=[failure,(b'ok','https://example.org')]) as call:
+            download_bytes('https://example.org/a',{},time.monotonic()+3,100)
+        self.assertEqual(call.call_count,2)
+
+    def test_tls_expired_deadline_no_retry(self):
+        failure=ssl.SSLError(1,'record layer failure')
+        with patch('free_sources._download_bytes',side_effect=failure) as call:
+            with self.assertRaises(ssl.SSLError): download_bytes('https://example.org/a',{},0,100)
+        self.assertEqual(call.call_count,1)
+
+    def test_cf_challenge_stops_same_host_not_other_sources(self):
+        events=[]
+        failure=urllib.error.HTTPError('https://publisher.example/a',403,'Forbidden',{'cf-mitigated':'challenge'},None)
+        with patch('free_sources.download_bytes',side_effect=[failure,(b'other','https://repository.example')]) as call:
+            self.engine.fetch('publisher',failure.url,{},time.monotonic()+3,events)
+            self.engine.fetch('publisher','https://publisher.example/b',{},time.monotonic()+3,events)
+            result=self.engine.fetch('repository','https://repository.example',{},time.monotonic()+3,events)
+        self.assertEqual(call.call_count,2)
+        self.assertEqual(events[0]['status'],'browser_verification_required')
+        self.assertEqual(events[1]['status'],'challenge_host_skipped')
+        self.assertEqual(result[0],b'other')
+
+    def test_plain_403_is_not_assumed_cloudflare(self):
+        events=[]
+        failure=urllib.error.HTTPError('https://publisher.example/a',403,'Forbidden',{},None)
+        with patch('free_sources.download_bytes',side_effect=failure):
+            self.engine.fetch('publisher',failure.url,{},time.monotonic()+3,events)
+        self.assertEqual(events[0]['status'],'access_denied')
+        self.assertFalse(self.engine.challenge_hosts)
+
+    def test_tls_failure_and_retry_are_observable(self):
+        events=[]
+        failure=ssl.SSLError(1,'record layer failure')
+        with patch('free_sources._download_bytes',side_effect=failure):
+            self.engine.fetch('repository','https://repository.example/a',{},time.monotonic()+3,events)
+        self.assertEqual(events[0]['status'],'tls_record_error')
+        self.assertEqual(events[-1]['status'],'tls12_retry')
+
+    def test_certificate_failure_has_specific_diagnostic(self):
+        events=[]
+        failure=ssl.SSLCertVerificationError(1,'certificate verify failed')
+        failure.verify_code=20
+        with patch('free_sources.download_bytes',side_effect=urllib.error.URLError(failure)):
+            self.engine.fetch('repository','https://repository.example/a',{},time.monotonic()+3,events)
+        self.assertEqual(events[0]['status'],'tls_certificate_error')
+        self.assertEqual(events[0]['certificate_verify_code'],20)
 
 
 if __name__ == '__main__': unittest.main()
