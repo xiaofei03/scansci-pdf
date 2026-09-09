@@ -34,6 +34,13 @@ Verified so far:
 - Real AlphaFold PDF acquisition through Unpaywall/publisher, 12 pages, DOI/title/
   first author/readability checks, Crossref VOR CC BY evidence and matching license
   URL in the actual PDF. This was a download-only test, not an upload.
+- The PMC Cloud route recovered DOI `10.3390/s25164937` despite publisher 403 and
+  absent indexed PDF URLs: 20 pages, official checksum, identity and in-file CC BY
+  checks passed. Real range-download resumption reused 15/21 segments, then finished.
+  Its original AbleSci request had meanwhile closed/received a file and was skipped;
+  this is download/resume evidence, not a successful helping upload.
+  A fresh official-metadata/cache recheck returned `ready` in 4.22 seconds. A separate
+  9-minute limited helping run exited normally with zero upload attempts.
 - Unit tests for identity, own-request exclusion, notes/supplement review, changed
   bytes, MD5 fast-upload acknowledgement, CAPTCHA stops and uncertain-write dedupe.
 - Saved ready/retryable jobs resume even after leaving the newest list page. Real
@@ -142,13 +149,20 @@ full-text subscriptions. Institutional access does not by itself authorize shari
   tickets are excluded. Read timeouts retry once; write timeouts never retry.
   Browser fetches have a 30 s abort timer and a bounded polling window. An uncertain
   upload remains reserved in the ledger even if the browser context disappears.
-- Per-paper discovery/validation runs in a child process with a 120 s ceiling.
+- Per-paper discovery/validation runs in a child process with a configurable
+  `--lookup-seconds` ceiling (default 180 s). A real 10.5 MiB PMC PDF exceeded the
+  previous hard-coded 65 s free-fetch phase; that limit is now derived from the
+  per-paper budget. The overall run deadline still takes precedence.
   Cached downloaded files remain for revalidation. Failed PDF lookups may retry
   after six hours; rights/identity/schema review states are not blindly retried.
   Stop/deadline termination reaps the child; a non-responsive child is killed after
   a three-second graceful termination window. No new lookup begins after stopping.
   With less than five seconds of run time left, defer the candidate without starting
   a lookup. `run_deadline` jobs resume next invocation, without the failure cooldown.
+  After fixing a source, `--retry-lookups` retries failures that predate this run,
+  once per invocation; it never resets upload states, budgets or identity/rights gates.
+  `download_incomplete` retains verified complete PMC segments and is eligible for
+  the next cycle rather than the six-hour failure cooldown. It is not a successful PDF.
 - Saved ready candidates are served before new list entries in live mode. They are
   rechecked against the current request and freshly resolved/revalidated using the
   existing file cache. Dry runs do not repeatedly process already-ready entries.
@@ -157,6 +171,9 @@ full-text subscriptions. Institutional access does not by itself authorize shari
 - Recheck current request status/DOI/title immediately before upload. Requests with
   arbitrary extra notes are conservatively skipped rather than assuming a standard
   article satisfies a special request. Uploaded/completed/own requests are skipped.
+- PMC Cloud PDFs retain their original bytes; the upload filename explicitly credits
+  NIH/NLM/PMC as the data source. Cached files require fresh repository metadata and
+  matching checksum. No NLM endorsement is implied.
 - `/assist/upload-request` accepts CSRF, request ID, filename, MD5 and byte size.
   Its code `10` means MD5-based upload already completed. Record `posting_uncertain`
   **before this request**, not just before the subsequent file transfer.

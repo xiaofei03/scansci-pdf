@@ -456,7 +456,7 @@ class Ledger:
     def summary(self):
         return dict(self.db.execute('SELECT state,COUNT(*) FROM jobs GROUP BY state'))
 
-    def candidates(self, fresh, live, limit, now=None):
+    def candidates(self, fresh, live, limit, now=None, retry_failed=False, retry_before=None):
         """Resume saved work even after the request disappears from the first page."""
         now = time.time() if now is None else now
         saved = self.db.execute('SELECT id,state,updated FROM jobs ORDER BY updated,id').fetchall()
@@ -467,8 +467,9 @@ class Ledger:
             if previous is None:
                 return True
             state, updated = previous
-            return (state == 'run_deadline' or (live and state == 'ready') or
-                    (state in ('no_verified_pdf', 'lookup_timeout', 'lookup_failed') and now - updated >= 21600))
+            return (state in ('run_deadline', 'download_incomplete') or (live and state == 'ready') or
+                    (state in ('no_verified_pdf', 'lookup_timeout', 'lookup_failed') and
+                     ((retry_failed and (retry_before is None or updated < retry_before)) or now - updated >= 21600)))
 
         ordered = [{'id': ident} for ident, _, _ in saved if runnable(ident)] + fresh
         unique = {}
@@ -478,11 +479,11 @@ class Ledger:
         return list(unique.values())[:limit]
 
 
-def lookup_child(root, doi, deadline):
+def lookup_child(root, doi, deadline, lookup_seconds=180):
     """Stop a lookup on SIGTERM promptly; never orphan a long PDF parser process."""
     command = [sys.executable, str(Path(__file__).resolve()), 'resolve',
-               '--work-dir', str(root), '--doi', doi]
-    end = min(deadline, time.monotonic() + 120)
+               '--work-dir', str(root), '--doi', doi, '--lookup-seconds', str(lookup_seconds)]
+    end = min(deadline, time.monotonic() + lookup_seconds)
     if STOP.is_set():
         raise Halt('stopped')
     if time.monotonic() >= end:
@@ -564,7 +565,7 @@ def authenticate(site, prompt):
     progress('authenticated', transport='http', session_persisted=False)
 
 
-def resolve(root, doi):
+def resolve(root, doi, lookup_seconds=180):
     """Reuse existing free lookup, but require additional redistribution evidence."""
     from free_sources import FreeSources
     from pipeline import crossref, validate_pdf
@@ -575,10 +576,12 @@ def resolve(root, doi):
     if not proof:
         return dict(status='rights_not_verified', doi=doi)
     # Original unchanged BY-SA copies may be shared under the same license.
-    engine = FreeSources(root, seconds=65, scihub_oa=False)
+    engine = FreeSources(root, seconds=max(1, lookup_seconds - 10), scihub_oa=False)
     found = engine.acquire(meta)
     if found.get('status') != 'verified':
-        return dict(status='no_verified_pdf', doi=doi, events=found.get('events', []))
+        events = found.get('events', [])
+        resumable = any(e.get('status') == 'parts_checkpoint' and 0 < e.get('completed', 0) < e.get('total', 0) for e in events)
+        return dict(status='download_incomplete' if resumable else 'no_verified_pdf', doi=doi, events=events)
     path = Path(found['pdf'])
     check = validate_pdf(path, meta)
     if check['status'] != 'verified' or path.stat().st_size > 50 * 1024 * 1024:
@@ -594,6 +597,7 @@ def resolve(root, doi):
         return dict(status='version_needs_review', doi=doi)
     return dict(status='ready', doi=doi, metadata=meta, pdf=str(path), sha256=check['sha256'],
                 validation=check, license=proof, source=found.get('source'), source_url=found.get('source_url'),
+                repository_id=found.get('repository_id'), source_attribution=found.get('source_attribution'),
                 attribution='Unmodified PDF; original authors, copyright and license notices retained.')
 
 
@@ -631,6 +635,9 @@ def upload(site, ledger, item, artifact, own_id, allowed_hosts):
     if not artifact.get('license') or len(raw) > 50 * 1024 * 1024:
         raise Halt('rights_or_size_check_failed')
     filename = 'article-' + artifact['sha256'][:20] + '.pdf'
+    if artifact.get('source') == 'pmc_cloud':
+        # Conspicuous source acknowledgement without altering the original PDF.
+        filename = 'Source-NIH-NLM-PMC-' + artifact['sha256'][:20] + '.pdf'
     record = dict(item=item, artifact=artifact, filename=filename)
     # /upload-request itself can complete a deduplicated upload (code 10).
     # Record uncertainty BEFORE any potentially committing request.
@@ -694,10 +701,14 @@ def main():
     parser.add_argument('--doi')
     parser.add_argument('--own-user-id')
     parser.add_argument('--hours', type=finite_positive, default=5)
+    parser.add_argument('--lookup-seconds', type=finite_positive, default=180,
+                        help='Per-paper lookup ceiling, including larger OA PDFs; default 180 seconds')
     parser.add_argument('--poll-seconds', type=finite_positive, default=120)
     parser.add_argument('--max-daily-uploads', type=int, default=10)
     parser.add_argument('--max-items-per-cycle', type=int, default=10)
     parser.add_argument('--allow-upload', action='store_true')
+    parser.add_argument('--retry-lookups', action='store_true',
+                        help='Retry failed read-only PDF lookups after fixing a source; never retry uploads')
     parser.add_argument('--upload-host', action='append', default=[])
     parser.add_argument('--prompt-login', action='store_true')
     parser.add_argument('--browser-session', action='store_true', help='Use existing Chrome login on macOS, no clicks or cookie export')
@@ -714,7 +725,7 @@ def main():
             print(json.dumps({'stage': 'runtime_ready', **runtime}), flush=True)
     if args.mode == 'resolve':
         from pipeline import doi_normalize
-        print(json.dumps(resolve(args.work_dir, doi_normalize(args.doi or ''))))
+        print(json.dumps(resolve(args.work_dir, doi_normalize(args.doi or ''), args.lookup_seconds)))
         return
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: STOP.set())
@@ -744,6 +755,7 @@ def main():
         authenticate(site, args.prompt_login)
         site.confirm_account(args.own_user_id)
     end = time.monotonic() + args.hours * 3600
+    retry_before = time.time()
     while time.monotonic() < end and not STOP.is_set():
         if args.allow_upload:
             reconcile(site, ledger, args.max_items_per_cycle)
@@ -751,7 +763,8 @@ def main():
             break
         started = time.monotonic()
         fresh = scan_page(site.call('/assist/index?status=waiting'))
-        candidates = ledger.candidates(fresh, args.allow_upload, args.max_items_per_cycle)
+        candidates = ledger.candidates(fresh, args.allow_upload, args.max_items_per_cycle,
+                                       retry_failed=args.retry_lookups, retry_before=retry_before)
         for entry in candidates:
             if STOP.is_set() or time.monotonic() >= end:
                 break
@@ -762,7 +775,7 @@ def main():
                 ledger.save(entry['id'], 'run_deadline', dict(item=item))
                 break
             progress('pdf_lookup', request_id=entry['id'], doi=item['doi'])
-            artifact = lookup_child(ledger.root / 'papers', item['doi'], end)
+            artifact = lookup_child(ledger.root / 'papers', item['doi'], end, args.lookup_seconds)
             ledger.save(entry['id'], artifact['status'], dict(item=item, artifact=artifact))
             progress('pdf_result', request_id=entry['id'], result=artifact['status'])
             if artifact['status'] == 'run_deadline':

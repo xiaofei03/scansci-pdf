@@ -147,6 +147,7 @@ class BotTests(unittest.TestCase):
                 ledger.save(ident, state, {})
             now = time.time()
             self.assertEqual(ledger.candidates([], True, 10, now), [])
+            self.assertEqual({r['id'] for r in ledger.candidates([], True, 10, now, retry_failed=True)}, {'FAILED', 'TIMEOUT'})
             self.assertEqual({r['id'] for r in ledger.candidates([], True, 10, now + 21601)}, {'FAILED', 'TIMEOUT'})
             ledger.save('DEFER1', 'run_deadline', {})
             self.assertEqual(ledger.candidates([], True, 10, now), [{'id': 'DEFER1'}])

@@ -65,6 +65,45 @@ class FreeTests(unittest.TestCase):
         self.assertEqual(events[0]['status'],'authentication_required')
         self.assertNotIn('SECRET',json.dumps(events))
 
+    def test_pmc_landing_page_is_preserved_without_pdf_url(self):
+        record = {'doi': self.meta['doi'], 'locations': [
+            {'is_oa': True, 'pdf_url': None, 'landing_page_url': 'https://www.ncbi.nlm.nih.gov/pmc/articles/123'}]}
+        with patch.object(self.engine, 'fetch', return_value=(json.dumps(record).encode(), 'https://api.openalex.org')):
+            found, _ = self.engine.provider('openalex', self.meta, time.monotonic()+5)
+        self.assertEqual(found, [{'source': 'pmc_cloud', 'pmcid': 'PMC123', 'version': 'unknown'}])
+
+    def test_explicit_crossref_pdf_with_unspecified_mime(self):
+        self.meta['links'] = [{'URL': 'https://publisher.example/article/pdf', 'content-type': 'unspecified'}]
+        with patch.object(self.engine, 'provider', return_value=([], [])), \
+             patch.object(self.engine, 'fetch', return_value=(self.pdf(), self.meta['links'][0]['URL'])) as fetch:
+            self.assertEqual(self.engine.acquire(self.meta)['status'], 'verified')
+        self.assertEqual(fetch.call_args.args[1], self.meta['links'][0]['URL'])
+
+    def test_range_response_must_be_partial_and_match_requested_bytes(self):
+        from free_sources import _download_bytes
+        from unittest.mock import MagicMock
+        for status, content_range in ((200, 'bytes 0-3/8'), (206, 'bytes 4-7/8'), (206, '')):
+            response = MagicMock()
+            response.status, response.headers = status, {'Content-Range': content_range}
+            response.__enter__.return_value = response
+            with patch('free_sources.request.build_opener') as opener:
+                opener.return_value.open.return_value = response
+                with self.assertRaisesRegex(ValueError, 'invalid_partial_response'):
+                    _download_bytes('https://pmc-oa-opendata.s3.amazonaws.com/file', {'Range': 'bytes=0-3'},
+                                    time.monotonic()+5, 100, 2)
+            response.read1.assert_not_called()
+
+    def test_pmc_checksum_failure_does_not_accept_pdf(self):
+        candidate = dict(source='pmc_cloud', pmcid='PMC123', version='unknown')
+        resolved = dict(source='pmc_cloud', url='https://pmc-oa-opendata.s3.amazonaws.com/PMC123.1/PMC123.1.pdf',
+                        version='publishedVersion', expected_md5='0'*32)
+        with patch.object(self.engine, 'provider', side_effect=lambda source, *args: ([], []) if source=='publisher_metadata' else ([candidate], [])), \
+             patch('pmc_cloud.candidates', return_value=[resolved]), \
+             patch('pmc_cloud.download_pdf', return_value=(self.pdf(), resolved['url'])):
+            result = self.engine.acquire(self.meta)
+        self.assertEqual(result['status'], 'unresolved')
+        self.assertTrue(any(e['status']=='checksum_mismatch' for e in result['events']))
+
     def test_rate_limit_cooldown_no_repeat(self):
         events=[]; err=urllib.error.HTTPError('https://api.example/',429,'limited',{'Retry-After':'200'},None)
         with patch('free_sources.download_bytes',side_effect=err) as call:

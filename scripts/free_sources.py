@@ -104,6 +104,13 @@ def _download_bytes(url, headers, deadline, limit, timeout, context=None, allowe
     handlers = [SafeRedirect(allowed_hosts)]
     if context is not None: handlers.append(request.HTTPSHandler(context=context))
     with request.build_opener(*handlers).open(req, timeout=min(timeout, remaining)) as r:
+        if 'Range' in headers:
+            wanted = re.fullmatch(r'bytes=(\d+)-(\d+)', headers['Range'])
+            actual = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', r.headers.get('Content-Range', ''))
+            if (r.status != 206 or not wanted or not actual or wanted.groups() != actual.groups()[:2]
+                    or int(actual[3]) <= int(actual[2])):
+                raise ValueError('invalid_partial_response')
+            limit = min(limit, int(wanted[2]) - int(wanted[1]) + 1)
         parts, count = [], 0
         while True:
             if time.monotonic() >= deadline: raise TimeoutError('lookup_deadline')
@@ -191,6 +198,9 @@ class FreeSources:
                 source_url(url, restricted)
                 # No API keys, cookies or personal headers enter this adapter.
                 headers = {'Accept': 'application/pdf' if pdf else 'text/html'}
+            elif source.startswith('pmc_cloud'):
+                restricted = {'pmc-oa-opendata.s3.amazonaws.com'}
+                source_url(url, restricted)
             data, final = download_bytes(url, headers, deadline, 60*1024*1024 if pdf else 4*1024*1024,
                                          transport_events=transport_events, allowed_hosts=restricted)
             events.append(dict(source=source, status='received', host=host, bytes=len(data),
@@ -280,7 +290,13 @@ class FreeSources:
                 for loc in locations:
                     if not loc or (source == 'openalex' and not loc.get('is_oa')): continue
                     u = loc.get('pdf_url') if source == 'openalex' else loc.get('url_for_pdf')
-                    if u: candidates.append(dict(source=source, url=u, version=loc.get('version', 'unknown')))
+                    from pmc_cloud import pmcid_from_url
+                    landing = loc.get('landing_page_url') if source == 'openalex' else loc.get('url_for_landing_page')
+                    pmcid = pmcid_from_url(landing) or pmcid_from_url(u)
+                    if pmcid:
+                        candidates.append(dict(source='pmc_cloud', pmcid=pmcid, version='unknown'))
+                    elif u:
+                        candidates.append(dict(source=source, url=u, version=loc.get('version', 'unknown')))
             events.append(dict(source=source, status='candidates', count=len(candidates)))
         except Exception:
             events.append(dict(source=source, status='invalid_metadata_or_identity'))
@@ -300,9 +316,17 @@ class FreeSources:
                 cached = json.loads(info.read_text(encoding='utf-8'))
                 check = validate_pdf(path, meta)
                 if check['status'] in ('verified', 'probably_correct'):
+                    if cached.get('source') == 'pmc_cloud':
+                        from pmc_cloud import candidates as from_pmc
+                        pmcid = (cached.get('repository_id') or '').split('.')[0]
+                        fresh = from_pmc(self.fetch, pmcid, meta, deadline, events)
+                        if (len(fresh) != 1 or fresh[0]['url'] != cached.get('source_url')
+                                or hashlib.md5(path.read_bytes()).hexdigest() != fresh[0]['expected_md5']):
+                            continue
                     return dict(status='verified', pdf=str(path), validation=check, source=cached['source'],
                                 source_url=cached['source_url'], source_version=cached.get('source_version','unknown'),
-                                events=[dict(source='cache',status='verified')], seconds=round(time.monotonic()-start,3))
+                                repository_id=cached.get('repository_id'), source_attribution=cached.get('source_attribution'),
+                                events=events+[dict(source='cache',status='verified')], seconds=round(time.monotonic()-start,3))
             except (ValueError, KeyError): pass
         discovery_deadline = min(deadline, start+18)
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -311,7 +335,10 @@ class FreeSources:
             for f in futures:
                 found, records = f.result(); candidates.extend(found); events.extend(records)
         candidates += [dict(source='publisher', url=x['URL'], version='unknown')
-                       for x in meta.get('links', []) if x.get('content-type') == 'application/pdf']
+                       for x in meta.get('links', []) if isinstance(x.get('URL'), str) and
+                       (x.get('content-type') == 'application/pdf' or
+                        (x.get('content-type') in (None, '', 'unspecified') and
+                         re.search(r'(?:/pdf|\.pdf)$', urlparse.urlsplit(x['URL']).path, re.I)))]
         if self.config['elsevier_api_key'] and ('elsevier' in meta.get('publisher','').lower() or
                 urlparse.urlsplit(meta['url']).hostname in ('www.sciencedirect.com','sciencedirect.com','linkinghub.elsevier.com')):
             candidates.append(dict(source='elsevier_api', url='https://api.elsevier.com/content/article/doi/'+
@@ -319,7 +346,16 @@ class FreeSources:
         # Prefer reported publisher versions; never change PDF identity gates for a repository copy.
         candidates.sort(key=lambda c: c['version'] != 'publishedVersion')
         def ordered_candidates():
-            yield from candidates
+            visited_pmc = set()
+            for c in candidates:
+                if c['source'] == 'pmc_cloud':
+                    if c['pmcid'] in visited_pmc:
+                        continue
+                    visited_pmc.add(c['pmcid'])
+                    from pmc_cloud import candidates as from_pmc
+                    yield from from_pmc(self.fetch, c['pmcid'], meta, deadline, events)
+                else:
+                    yield c
             # A slow publisher HTML page must not delay an already known PDF.
             if time.monotonic() < deadline:
                 found, records = self.provider('publisher_metadata', meta, min(deadline,time.monotonic()+12))
@@ -336,9 +372,15 @@ class FreeSources:
             if c['source'] == 'elsevier_api':
                 headers['X-ELS-APIKey'] = self.config['elsevier_api_key']
                 if self.config['elsevier_insttoken']: headers['X-ELS-Insttoken'] = self.config['elsevier_insttoken']
-            result = self.fetch(c['source'], url, headers, deadline, events, pdf=True)
+            if c['source'] == 'pmc_cloud':
+                from pmc_cloud import download_pdf
+                result = download_pdf(self, c, deadline, events)
+            else:
+                result = self.fetch(c['source'], url, headers, deadline, events, pdf=True)
             if not result: continue
             data, final = result
+            if c.get('expected_md5') and hashlib.md5(data).hexdigest() != c['expected_md5']:
+                events.append(dict(source=c['source'], status='checksum_mismatch')); continue
             if not data.startswith(b'%PDF-'):
                 events.append(dict(source=c['source'], status='not_pdf')); continue
             path = doi_dir / (hashlib.sha256(data).hexdigest()[:20] + '.pdf')
@@ -351,7 +393,9 @@ class FreeSources:
             safe_url = urlparse.urlunsplit(p._replace(query='', fragment=''))
             out = dict(status='verified', pdf=str(path), validation=check, source=c['source'],
                        source_url=safe_url, source_version=c['version'])
-            path.with_suffix('.json').write_text(json.dumps({k:out[k] for k in ('source','source_url','source_version')}), encoding='utf-8')
+            for key in ('repository_id', 'source_attribution'):
+                if c.get(key): out[key] = c[key]
+            path.with_suffix('.json').write_text(json.dumps({k:out[k] for k in ('source','source_url','source_version','repository_id','source_attribution') if k in out}), encoding='utf-8')
             return {**out, 'events':events, 'seconds':round(time.monotonic()-start,3)}
         # The supplementary source owns a fresh budget, even if primary lookup expired.
         result = self.acquire_scihub_oa(meta)

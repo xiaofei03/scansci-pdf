@@ -12,6 +12,23 @@ pages must match DOI and normalized title before following citation_pdf_url.
 Repository PDFs exposed by these indexes are supported, but there is no independent
 CORE/Semantic Scholar/search-engine adapter or unrestricted website crawler.
 
+OA locations pointing to PMC are resolved through NLM's public Cloud Service even
+when the index has no PDF URL. `pmc_cloud.py` lists only that PMCID's version prefixes
+(at most 10 entries; at most three versions), checks DOI/title, OA license, retraction
+and manuscript flags, then downloads the declared PDF from the official S3 bucket.
+PDF MD5 must match the metadata before the usual identity/completeness checks.
+Only unambiguous published CC BY/BY-SA/CC0 records qualify in this adapter.
+Files use two 512 KiB range-download workers with If-Match and strict Content-Range
+checks. Complete segments retain local SHA-256 checksums and resume under the same
+object ETag; the assembled file must match the official whole-file MD5. Partial
+segments never become PDFs or Zotero attachments. No corpus-wide bucket scan occurs.
+Cached PMC copies are rechecked against current repository metadata/checksum before
+reuse. Source attribution is retained in the cache and result. No AWS account/key
+is required. No PMC website scraping or retired OA Web Service calls are used.
+Explicit Crossref URLs ending `/pdf` or `.pdf` are candidates even if their MIME
+type is `unspecified`; URLs are not invented, and returned bytes still require PDF
+and identity validation.
+
 At most 6 primary candidate URLs are downloaded per paper, preferring reported published versions.
 If none succeeds, the license-gated supplementary source below may try one more PDF.
 Default primary lookup budget: 75 seconds per paper including discovery; discovery has an
@@ -164,6 +181,10 @@ After credentials are present, validate each adapter with a real source-specific
 mock tests alone do not prove actual key validity, PDF entitlement or improved hit rate.
 
 ## Official references checked 2026-09-09
+
+- PMC current cloud access: https://pmc.ncbi.nlm.nih.gov/tools/pmcaws/
+- PMC dataset schema: https://pmc-oa-opendata.s3.amazonaws.com/README.txt
+- Retired OA Web Service notice: https://pmc.ncbi.nlm.nih.gov/tools/oa-service/
 
 - Unpaywall API: https://unpaywall.org/api ; schema https://unpaywall.org/data-format
 - OpenAlex authentication and free-key setup: https://help.openalex.org/api/authentication/
