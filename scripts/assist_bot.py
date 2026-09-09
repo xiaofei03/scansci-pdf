@@ -213,7 +213,9 @@ class Site:
         if result['code'] != 0:
             raise Halt('login_or_verification_required')
         html = self.call('/my/assist-give')
-        if 'able-head-user-guest' in html or 'id="login-form"' in html:
+        logout = [a for a in Page(html).root.all('a') if
+                  urlparse.urljoin(BASE, a.attrs.get('href', '')) == BASE + '/site/logout']
+        if 'able-head-user-guest' in html or 'id="login-form"' in html or not logout:
             raise Halt('login_not_confirmed')
 
     def detail(self, ident):
@@ -253,6 +255,101 @@ class Ledger:
 
     def summary(self):
         return dict(self.db.execute('SELECT state,COUNT(*) FROM jobs GROUP BY state'))
+
+    def candidates(self, fresh, live, limit, now=None):
+        """Resume saved work even after the request disappears from the first page."""
+        now = time.time() if now is None else now
+        saved = self.db.execute('SELECT id,state,updated FROM jobs ORDER BY updated,id').fetchall()
+        rows = {ident: (state, updated) for ident, state, updated in saved}
+
+        def runnable(ident):
+            previous = rows.get(ident)
+            if previous is None:
+                return True
+            state, updated = previous
+            return ((live and state == 'ready') or
+                    (state in ('no_verified_pdf', 'lookup_timeout', 'lookup_failed') and now - updated >= 21600))
+
+        ordered = [{'id': ident} for ident, _, _ in saved if runnable(ident)] + fresh
+        unique = {}
+        for entry in ordered:
+            if runnable(entry['id']):
+                unique.setdefault(entry['id'], entry)
+        return list(unique.values())[:limit]
+
+
+def lookup_child(root, doi, deadline):
+    """Stop a lookup on SIGTERM promptly; never orphan a long PDF parser process."""
+    command = [sys.executable, str(Path(__file__).resolve()), 'resolve',
+               '--work-dir', str(root), '--doi', doi]
+    end = min(deadline, time.monotonic() + 120)
+    if STOP.is_set():
+        raise Halt('stopped')
+    if time.monotonic() >= end:
+        return {'status': 'lookup_timeout'}
+    child_env = {k: v for k, v in os.environ.items() if k not in ('ABLESCI_PASSWORD', 'ABLESCI_USERNAME')}
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=child_env)
+    try:
+        while True:
+            if STOP.is_set():
+                raise Halt('stopped')
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return {'status': 'lookup_timeout'}
+            try:
+                stdout, _ = child.communicate(timeout=min(0.5, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+            if child.returncode != 0:
+                return {'status': 'lookup_failed'}
+            try:
+                result = json.loads(stdout)
+                if not isinstance(result, dict) or not isinstance(result.get('status'), str):
+                    raise ValueError()
+                return result
+            except (ValueError, TypeError):
+                return {'status': 'lookup_failed'}
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.communicate()
+
+
+def reconcile(site, ledger, limit=10):
+    """Observe existing writes only. A closed request does not prove our acceptance."""
+    rows = ledger.db.execute("SELECT id,state,data FROM jobs WHERE state IN "
+                             "('posting_uncertain','uploaded','submitted_unconfirmed') ORDER BY updated LIMIT ?",
+                             (limit,)).fetchall()
+    result = []
+    for ident, state, payload in rows:
+        if STOP.is_set():
+            break
+        current = site.detail(ident)
+        record = json.loads(payload)
+        expected = record.get('artifact', {}).get('doi')
+        observation = {'checked_at': time.time(), 'request_state': current['state'],
+                       'doi_matches': bool(expected and current['doi'] == expected),
+                       'acceptance': 'not_verified', 'points_earned': None}
+        record['remote_observation'] = observation
+        ledger.save(ident, state, record)
+        result.append({'id': ident, 'local_state': state, **observation})
+    return result
+
+
+def authenticate(site, prompt):
+    # Pop even in prompt mode so an inherited secret cannot leak into child jobs.
+    supplied = os.environ.pop('ABLESCI_PASSWORD', '')
+    if prompt and not sys.stdin.isatty():
+        raise Halt('login_prompt_requires_private_interactive_terminal')
+    username = input('AbleSci email/username: ') if prompt else os.environ.get('ABLESCI_USERNAME', '')
+    password = getpass.getpass('AbleSci password (not saved): ') if prompt else supplied
+    if not username or not password:
+        raise Halt('credentials_required_use_local_prompt_or_secret_injection')
+    site.login(username, password)
 
 
 def resolve(root, doi):
@@ -362,7 +459,7 @@ def finite_positive(value):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=['scan', 'run', 'status', 'resolve'])
+    parser.add_argument('mode', choices=['scan', 'run', 'status', 'resolve', 'login-check', 'reconcile'])
     parser.add_argument('--work-dir', required=True, type=Path)
     parser.add_argument('--doi')
     parser.add_argument('--own-user-id')
@@ -375,21 +472,24 @@ def main():
     parser.add_argument('--prompt-login', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: STOP.set())
     if args.max_daily_uploads < 1 or args.max_items_per_cycle < 1 or args.poll_seconds < 30:
         parser.error('positive limits and poll interval >=30 seconds required')
     if args.mode == 'resolve':
         from pipeline import doi_normalize
         print(json.dumps(resolve(args.work_dir, doi_normalize(args.doi or ''))))
         return
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: STOP.set())
     ledger = Ledger(args.work_dir)
     if args.mode == 'status':
         print(json.dumps(ledger.summary())); return
     site = Site()
+    if args.mode == 'login-check':
+        authenticate(site, args.prompt_login)
+        print(json.dumps({'logged_in': True, 'session_persisted': False, 'uploaded': 0})); return
     if args.mode == 'scan':
         print(json.dumps(scan_page(site.call('/assist/index?status=waiting')), ensure_ascii=False)); return
-    if not args.own_user_id or not re.fullmatch(r'[A-Za-z0-9]+', args.own_user_id):
+    if args.mode == 'run' and (not args.own_user_id or not re.fullmatch(r'[A-Za-z0-9]+', args.own_user_id)):
         parser.error('--own-user-id is required to exclude your own requests')
     # One daemon owns this ledger; kernel releases lock after a crash. No stale lock deletion.
     import fcntl
@@ -398,35 +498,26 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         raise Halt('another_runner_owns_this_work_directory')
+    if args.mode == 'reconcile':
+        print(json.dumps(reconcile(site, ledger, args.max_items_per_cycle))); return
     if args.allow_upload:
-        username = input('AbleSci email/username: ') if args.prompt_login else os.environ.get('ABLESCI_USERNAME', '')
-        password = getpass.getpass('AbleSci password (not saved): ') if args.prompt_login else os.environ.pop('ABLESCI_PASSWORD', '')
-        if not username or not password:
-            raise Halt('credentials_required_use_local_prompt_or_secret_injection')
-        site.login(username, password)
-        password = None
+        authenticate(site, args.prompt_login)
     end = time.monotonic() + args.hours * 3600
     while time.monotonic() < end and not STOP.is_set():
+        if args.allow_upload:
+            reconcile(site, ledger, args.max_items_per_cycle)
         if args.allow_upload and ledger.attempted_today() >= args.max_daily_uploads:
             break
         started = time.monotonic()
-        candidates = scan_page(site.call('/assist/index?status=waiting'))[:args.max_items_per_cycle]
+        fresh = scan_page(site.call('/assist/index?status=waiting'))
+        candidates = ledger.candidates(fresh, args.allow_upload, args.max_items_per_cycle)
         for entry in candidates:
             if STOP.is_set() or time.monotonic() >= end:
                 break
-            prior = ledger.state(entry['id'])
-            if prior and not (args.allow_upload and prior[0] == 'ready') and (prior[0] not in ('no_verified_pdf', 'lookup_timeout') or time.time() - prior[1] < 21600):
-                continue
             item = site.detail(entry['id'])
             if not eligible(item, args.own_user_id):
                 ledger.save(entry['id'], 'skipped', item); continue
-            try:
-                result = subprocess.run([sys.executable, str(Path(__file__).resolve()), 'resolve',
-                    '--work-dir', str(ledger.root / 'papers'), '--doi', item['doi']],
-                    capture_output=True, text=True, timeout=min(120, max(1, end - time.monotonic())))
-                artifact = json.loads(result.stdout) if result.returncode == 0 else {'status': 'lookup_failed'}
-            except subprocess.TimeoutExpired:
-                artifact = {'status': 'lookup_timeout'}
+            artifact = lookup_child(ledger.root / 'papers', item['doi'], end)
             ledger.save(entry['id'], artifact['status'], dict(item=item, artifact=artifact))
             if artifact['status'] == 'ready' and args.allow_upload:
                 if ledger.attempted_today() >= args.max_daily_uploads:

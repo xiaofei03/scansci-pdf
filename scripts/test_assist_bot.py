@@ -2,11 +2,15 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
 from assist_bot import (Halt, Ledger, detail_page, eligible, multipart, request_id,
-                        safe_host, scan_page, upload)
+                        safe_host, scan_page, upload, STOP, Site, lookup_child, reconcile, authenticate)
 
 
 def detail_html(state='waiting', note='', owner='OTHER', doi='10.1000/test'):
@@ -22,6 +26,95 @@ def detail_html(state='waiting', note='', owner='OTHER', doi='10.1000/test'):
 
 
 class BotTests(unittest.TestCase):
+    def tearDown(self):
+        STOP.clear()
+
+    def test_queue_resumes_ready_items_not_on_first_page(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ledger = Ledger(folder)
+            ledger.save('ABC123', 'ready', {})
+            ledger.save('POSTED', 'posting_uncertain', {})
+            fresh = [{'id': 'FRESH1'}, {'id': 'ABC123'}, {'id': 'POSTED'}]
+            self.assertEqual([r['id'] for r in ledger.candidates(fresh, True, 10)], ['ABC123', 'FRESH1'])
+            self.assertEqual(ledger.candidates(fresh, False, 10), [{'id': 'FRESH1'}])
+            self.assertEqual(ledger.candidates([], True, 10), [{'id': 'ABC123'}])
+            ledger.db.close()
+
+    def test_queue_retry_backoff_without_resetting_write_states(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ledger = Ledger(folder)
+            for ident, state in [('FAILED', 'lookup_failed'), ('TIMEOUT', 'lookup_timeout'),
+                                 ('UPLOAD', 'uploaded'), ('UNCERT', 'posting_uncertain')]:
+                ledger.save(ident, state, {})
+            now = time.time()
+            self.assertEqual(ledger.candidates([], True, 10, now), [])
+            self.assertEqual({r['id'] for r in ledger.candidates([], True, 10, now + 21601)}, {'FAILED', 'TIMEOUT'})
+            ledger.db.close()
+
+    def test_login_requires_positive_authenticated_page_evidence(self):
+        from unittest.mock import MagicMock
+        site = Site(interval=0)
+        site.call = MagicMock(side_effect=['<meta name="csrf-token" content="token">', {'code': 0}, '<html>maintenance</html>'])
+        with self.assertRaisesRegex(Halt, 'login_not_confirmed'):
+            site.login('user', 'not-a-real-password')
+        site.call = MagicMock(side_effect=['<meta name="csrf-token" content="token">', {'code': 0}, '<a href="/site/logout">退出</a>'])
+        site.login('user', 'not-a-real-password')
+
+    def test_login_prompt_cannot_fall_back_to_echoed_pipe(self):
+        with patch('sys.stdin.isatty', return_value=False), patch.dict('os.environ', {'ABLESCI_PASSWORD': 'test-secret'}):
+            with self.assertRaisesRegex(Halt, 'private_interactive_terminal'):
+                authenticate(None, True)
+            import os
+            self.assertNotIn('ABLESCI_PASSWORD', os.environ)
+
+    def test_real_lookup_child_terminated_on_stop(self):
+        original_popen = subprocess.Popen
+        children = []
+        def spawn(*args, **kwargs):
+            child = original_popen([sys.executable, '-c', 'import time; time.sleep(30)'], **kwargs)
+            children.append(child)
+            return child
+        timer = threading.Timer(0.1, STOP.set)
+        timer.start()
+        try:
+            with patch('assist_bot.subprocess.Popen', side_effect=spawn):
+                with self.assertRaisesRegex(Halt, 'stopped'):
+                    lookup_child(Path('/unused'), '10.1000/test', time.monotonic() + 10)
+            self.assertTrue(children)
+            self.assertIsNotNone(children[0].poll())
+        finally:
+            timer.join()
+            for child in children:
+                if child.poll() is None:
+                    child.kill(); child.wait()
+
+    def test_real_lookup_child_timeout_reaped(self):
+        original_popen = subprocess.Popen
+        children = []
+        def spawn(*args, **kwargs):
+            child = original_popen([sys.executable, '-c', 'import time; time.sleep(30)'], **kwargs)
+            children.append(child)
+            return child
+        with patch('assist_bot.subprocess.Popen', side_effect=spawn):
+            result = lookup_child(Path('/unused'), '10.1000/test', time.monotonic() + 0.2)
+        self.assertEqual(result['status'], 'lookup_timeout')
+        self.assertIsNotNone(children[0].poll())
+
+    def test_reconcile_is_read_only_and_does_not_invent_acceptance(self):
+        from unittest.mock import MagicMock
+        with tempfile.TemporaryDirectory() as folder:
+            ledger = Ledger(folder)
+            ledger.save('ABC123', 'posting_uncertain', {'artifact': {'doi': '10.1000/test'}})
+            site = MagicMock()
+            site.detail.return_value = detail_page(detail_html(state='completed'), 'ABC123')
+            observations = reconcile(site, ledger)
+            self.assertEqual(ledger.state('ABC123')[0], 'posting_uncertain')
+            self.assertEqual(observations[0]['acceptance'], 'not_verified')
+            self.assertIsNone(observations[0]['points_earned'])
+            self.assertTrue(observations[0]['doi_matches'])
+            site.call.assert_not_called()
+            ledger.db.close()
+
     def test_detail_identity_and_note(self):
         item = detail_page(detail_html(), 'ABC123')
         self.assertEqual(item['doi'], '10.1000/test')

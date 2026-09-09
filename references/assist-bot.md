@@ -16,6 +16,8 @@ Verified so far:
   URL in the actual PDF. This was a download-only test, not an upload.
 - Unit tests for identity, own-request exclusion, notes/supplement review, changed
   bytes, MD5 fast-upload acknowledgement, CAPTCHA stops and uncertain-write dedupe.
+- Saved ready/retryable jobs resume even after leaving the newest list page. Real
+  subprocess tests verify stop/deadline termination and reaping, not just mocked flags.
 - The upload handshake was read from the site's logged-in form using a one-time
   read-only inspection of the existing local browser session, without cookie export.
 
@@ -49,6 +51,9 @@ it between cloud and local processes concurrently; the local lock is not distrib
 # Read-only list; creates a local ledger but does not log in/upload.
 python3 scripts/assist_bot.py scan --work-dir /private/path/assist-job
 
+# Check script login only: no downloads or uploads. Credentials stay in memory.
+python3 scripts/assist_bot.py login-check --work-dir /private/path/assist-job --prompt-login
+
 # Download and verify one DOI, without helping or importing into Zotero.
 python3 scripts/assist_bot.py resolve --work-dir /private/path/assist-job/papers \
   --doi 10.1038/s41586-021-03819-2
@@ -64,6 +69,9 @@ python3 scripts/assist_bot.py run --work-dir /private/path/assist-job \
   --allow-upload --prompt-login
 
 python3 scripts/assist_bot.py status --work-dir /private/path/assist-job
+
+# Public read-only observations for existing uploads/uncertain writes; never reposts.
+python3 scripts/assist_bot.py reconcile --work-dir /private/path/assist-job
 ```
 
 `YOUR_PUBLIC_USER_ID` is the `id` in your own public profile URL, not your nickname
@@ -76,6 +84,10 @@ manager; the password is removed from the process environment before lookup chil
 processes launch. Do not put credentials in command arguments, repository files,
 job JSON, shell history, or plaintext cookie files. Cookies exist in memory only;
 after restart, authenticate again. Do not bypass a login challenge.
+The login-only check also ends its in-memory session when it exits; `run` must log
+in again. Hidden prompts require a real private terminal and never fall back to
+echoed pipe input. Positive authenticated navigation evidence is required after
+login; a success code followed by a maintenance page is not successful login.
 
 Existing OpenAlex/Unpaywall/Elsevier settings are reused. No credential is migrated
 with this repository. OpenAlex/Unpaywall are discovery indexes, not universal
@@ -92,6 +104,11 @@ full-text subscriptions. Institutional access does not by itself authorize shari
 - Per-paper discovery/validation runs in a child process with a 120 s ceiling.
   Cached downloaded files remain for revalidation. Failed PDF lookups may retry
   after six hours; rights/identity/schema review states are not blindly retried.
+  Stop/deadline termination reaps the child; a non-responsive child is killed after
+  a three-second graceful termination window. No new lookup begins after stopping.
+- Saved ready candidates are served before new list entries in live mode. They are
+  rechecked against the current request and freshly resolved/revalidated using the
+  existing file cache. Dry runs do not repeatedly process already-ready entries.
 - SQLite ledger plus OS process lock prevents same-work-directory overlap.
   Do not create a new work directory to evade an uncertain write.
 - Recheck current request status/DOI/title immediately before upload. Requests with
@@ -109,8 +126,10 @@ full-text subscriptions. Institutional access does not by itself authorize shari
   the process with exit 2. Signed tickets are not logged/persisted. A transport
   failure is not evidence that no upload occurred; **never auto-repost it**.
 - `uploaded` means a successful server acknowledgement, not acceptance or points
-  earned. Review the site for acceptance. Automatic acceptance tracking remains
-  a subsequent implementation/validation step; do not manufacture earnings metrics.
+  earned. `reconcile` and live loop observations save remote request state and DOI
+  agreement without changing a local uncertain/acknowledged state. A request being
+  closed alone does not identify the accepted uploader. Exact file-level acceptance
+  and points tracking remain incomplete; do not manufacture earnings metrics.
 
 Before cloud deployment: validate one real upload, verify account exclusion and
 storage hostname, then run a short bounded batch and 5-hour soak. Use persistent
