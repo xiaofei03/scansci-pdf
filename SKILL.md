@@ -49,6 +49,11 @@ user action. Do not weaken identity checks or change security settings to meet a
    `--retry-free` explicitly retries missing jobs without existing AbleSci requests.
    For an explicitly requested unattended batch, use `--until-complete` and a
    suitable `--max-run-seconds`; observe the live process, not repeated fresh runs.
+   Each request's uploader wait defaults to 300 seconds across polling rounds
+   (`--ablesci-wait-seconds`). On expiry, preserve the request/budget and stop waiting
+   for that item in this invocation; no automatic repost, cancellation or new timer.
+   A later explicit resume checks the same request with a new bounded window.
+   This limit does not cancel an active PDF transfer or its validation/import.
    Preflight checks the explicit writable `--downloads-dir`. Completed transfers
    without a local file export the already delivered visible blob link automatically;
    no native Save As/multiple-download permission is needed for that export.

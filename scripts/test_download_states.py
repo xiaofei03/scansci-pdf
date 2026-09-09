@@ -8,10 +8,61 @@ from unittest.mock import patch
 
 from pipeline import Batch
 from ablesci import AbleSci, navigate, read_chrome, chrome
-from batch import finish_ablesci, requested_complete, only_review_remaining
+from batch import finish_ablesci, requested_complete, only_review_remaining, only_wait_limit_remaining
 
 
 class DownloadStateTests(unittest.TestCase):
+    def test_uploader_default_is_300_seconds_across_rounds(self):
+        self.job.pop('download_attempt')
+        self.b.save(self.job)
+        clock=[0.0]
+        def sleep(n):clock[0]+=n
+        with patch('batch.time.monotonic',side_effect=lambda:clock[0]), \
+             patch('batch.time.sleep',side_effect=sleep), \
+             patch('batch.navigate'), \
+             patch('batch.AbleSci',return_value=self.a), \
+             patch.object(self.a,'reconcile',return_value={'status':'waiting'}) as read, \
+             patch.object(self.a,'submit',side_effect=AssertionError('never repost')), \
+             patch.object(self.a,'download',side_effect=AssertionError('no file')):
+            for _ in range(20):
+                result=finish_ablesci(self.b,[self.doi],self.root,50,100)
+                if only_wait_limit_remaining(self.b,result,[self.doi]):break
+            self.assertEqual(clock[0],300)
+            self.assertEqual(self.a.job(self.doi)['ablesci_wait_status'],'wait_limit_reached')
+            count=read.call_count
+            finish_ablesci(self.b,[self.doi],self.root,50,100)
+            self.assertEqual(read.call_count,count)
+        self.assertFalse(requested_complete(result,[self.doi]))
+        self.assertEqual(self.a.db.execute('SELECT COUNT(*) FROM requests').fetchone()[0],1)
+        self.assertEqual(self.a.db.execute('SELECT SUM(points) FROM requests').fetchone()[0],10)
+
+    def test_resume_after_wait_limit_observes_same_request(self):
+        self.job.pop('download_attempt')
+        self.job['ablesci_wait_status']='wait_limit_reached'
+        self.b.save(self.job)
+        with patch('batch.navigate'), patch('batch.AbleSci',return_value=self.a), \
+             patch.object(self.a,'reconcile',return_value={'status':'file_available'}), \
+             patch.object(self.a,'download',return_value={'status':'download_pending'}) as download, \
+             patch.object(self.a,'submit',side_effect=AssertionError('never repost')):
+            finish_ablesci(self.b,[self.doi],self.root,50,100,wait_seconds=0)
+        download.assert_called_once()
+        self.assertNotIn('ablesci_wait_status',self.a.job(self.doi))
+
+    def test_wait_limit_does_not_cancel_existing_transfer(self):
+        self.b.ablesci_wait_deadlines={self.doi:0}
+        self.b.ablesci_wait_expired={self.doi}
+        with patch('batch.AbleSci',return_value=self.a), \
+             patch.object(self.a,'download',return_value={'status':'download_pending'}) as download:
+            result=finish_ablesci(self.b,[self.doi],self.root,50,100)
+        download.assert_called_once()
+        self.assertFalse(only_wait_limit_remaining(self.b,result,[self.doi]))
+
+    def test_one_timeout_does_not_stop_other_requests(self):
+        self.b.ablesci_wait_expired={self.doi}
+        jobs=[{'doi':self.doi,'status':'needs_ablesci'},
+              {'doi':'10.1234/second','status':'needs_ablesci'}]
+        self.assertFalse(only_wait_limit_remaining(self.b,jobs,[j['doi'] for j in jobs]))
+
     def test_review_only_batch_does_not_touch_browser_or_poll(self):
         self.b.save({**self.job,'status':'existing_outside_target'})
         with patch('batch.transfer_state',side_effect=AssertionError('no browser')):

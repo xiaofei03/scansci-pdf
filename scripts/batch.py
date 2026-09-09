@@ -24,6 +24,25 @@ def attachment_complete(adapter, doi):
     return adapter.job(doi).get('status')=='complete'
 
 
+def only_wait_limit_remaining(b, results, dois, accept=False):
+    """A timed-out request is resumable, never complete or automatically reposted."""
+    expired=getattr(b,'ablesci_wait_expired',set())
+    states={j['doi']:j for j in results}
+    pending=[doi_normalize(d) for d in dois
+             if not requested_complete(results,[d],accept)]
+    return bool(pending) and all(d in expired and
+        states.get(d,{}).get('status')=='needs_ablesci' and
+        not states[d].get('pdf') and not states[d].get('download_attempt') for d in pending)
+
+
+def expire_uploader_wait(b, job, url, seconds):
+    b.ablesci_wait_expired.add(job['doi'])
+    job['ablesci_wait_status']='wait_limit_reached'
+    job['ablesci_wait_limit_seconds']=seconds
+    b.save(job)
+    b.event(job,'ablesci_wait_limit_reached',url=url,seconds=seconds)
+
+
 def only_review_remaining(results, dois, accept=False):
     """Stop idle polling only when every outstanding job requires a user decision.
 
@@ -137,7 +156,7 @@ def _run(b, dois, test_skip_find, test_force_gui_attach, pool):
     return b.report()
 
 
-def finish_ablesci(b, dois, downloads_dir, per_paper=0, total=0, wait_seconds=45,
+def finish_ablesci(b, dois, downloads_dir, per_paper=0, total=0, wait_seconds=300,
                    download_wait=900, fast=False, accept=False, paper_budgets=None, allow_site_minimum=False):
     current_results=b.report()
     if only_review_remaining(current_results,dois,accept):
@@ -147,6 +166,9 @@ def finish_ablesci(b, dois, downloads_dir, per_paper=0, total=0, wait_seconds=45
                       if j['doi'] in {doi_normalize(d) for d in dois} and j['status']!='complete'])
         return current_results
     adapter = AbleSci(b.root)
+    if not hasattr(b,'ablesci_wait_deadlines'):
+        b.ablesci_wait_deadlines={}
+        b.ablesci_wait_expired=set()
     b.needs_review=False
     if not resume_gui(b,dois):return b.report()
     if requested_complete(b.report(),dois,accept):return b.report()
@@ -184,6 +206,8 @@ def finish_ablesci(b, dois, downloads_dir, per_paper=0, total=0, wait_seconds=45
                     b.event(job,'ablesci_acceptance',result=adapter.accept_verified(doi,approved=True))
                 continue
             if job['status'] != 'needs_ablesci':continue
+            if doi in b.ablesci_wait_expired and not job.get('download_attempt'):
+                continue
             # download() can resume a live transfer or pick up a finished local file
             # without first navigating away from its page.
             if req and req[0]=='submitted' and job.get('download_attempt'):
@@ -225,13 +249,22 @@ def finish_ablesci(b, dois, downloads_dir, per_paper=0, total=0, wait_seconds=45
             if req[0] != 'submitted' or not req[1]:
                 b.event(job, 'ablesci_uncertain_requires_reconcile')
                 return b.report()
-            deadline = time.monotonic() + max(0, min(wait_seconds, 120))
+            first_wait=doi not in b.ablesci_wait_deadlines
+            deadline=b.ablesci_wait_deadlines.setdefault(doi,time.monotonic()+max(0,wait_seconds))
+            if not first_wait and time.monotonic()>=deadline:
+                expire_uploader_wait(b,job,req[1],wait_seconds)
+                continue
+            # Short rounds keep other requested papers moving, but never reset
+            # this request's five-minute window in --until-complete mode.
+            round_deadline=min(deadline,time.monotonic()+45)
             while True:
                 # Request pages are server-rendered; rereading the same DOM cannot
                 # discover a later upload. This is not the active transfer page.
                 navigate(req[1], refresh=True)
                 state = adapter.reconcile(doi)
                 if state['status'] == 'file_available':
+                    job.pop('ablesci_wait_status',None)
+                    b.save(job)
                     result = adapter.download(doi, downloads_dir,download_wait,fast,limit,total)
                     b.event(job, 'ablesci_download', **result)
                     if result['status'] == 'download_verified':
@@ -243,7 +276,10 @@ def finish_ablesci(b, dois, downloads_dir, per_paper=0, total=0, wait_seconds=45
                         b.needs_review=result['status']!='download_pending'
                         return b.report()  # Never leave an active transfer to post the next request.
                     break
-                remaining = deadline - time.monotonic()
+                if time.monotonic()>=deadline:
+                    expire_uploader_wait(b,job,req[1],wait_seconds)
+                    break
+                remaining = round_deadline - time.monotonic()
                 if remaining <= 0:
                     b.event(job, 'ablesci_waiting', url=req[1])
                     break
@@ -274,7 +310,8 @@ def main():
     p.add_argument('--retry-free', action='store_true', help='Explicitly retry unresolved free lookup after credentials/network change; never duplicate submitted AbleSci jobs')
     p.add_argument('--approved-per-paper-points', type=int, default=0)
     p.add_argument('--approved-total-points', type=int, default=0)
-    p.add_argument('--ablesci-wait-seconds', type=int, default=45)
+    p.add_argument('--ablesci-wait-seconds', type=int, default=300,
+                   help='Per-request uploader wait per invocation, shared across polling rounds; default 300, 0 checks once')
     p.add_argument('--download-wait-seconds',type=int,default=900)
     p.add_argument('--approved-fast-download',action='store_true',default=True,help='Default: prefer 2-point fast downloads within authorized caps')
     p.add_argument('--no-fast-download',dest='approved_fast_download',action='store_false',help='Use free routes only')
@@ -284,6 +321,7 @@ def main():
     p.add_argument('--paper-budget',action='append',default=[],metavar='DOI=POINTS',help='Explicit per-paper total cap override')
     p.add_argument('--approved-site-minimum',action='store_true',help='Allow mandatory minimum only for explicit --paper-budget DOI overrides')
     args = p.parse_args()
+    if args.ablesci_wait_seconds<0:p.error('--ablesci-wait-seconds must be nonnegative')
     paper_budgets={}
     for override in args.paper_budget:
         doi,value=override.rsplit('=',1)
@@ -325,8 +363,11 @@ def main():
                                 args.approved_total_points, args.ablesci_wait_seconds,
                                 args.download_wait_seconds,args.approved_fast_download,args.approved_accept_verified,paper_budgets,args.approved_site_minimum)
         while args.until_complete and not getattr(b,'needs_review',False) and not requested_complete(results,dois,args.approved_accept_verified) and time.monotonic()-started<args.max_run_seconds:
+            if only_wait_limit_remaining(b,results,dois,args.approved_accept_verified):break
             print(json.dumps({'batch_waiting':True,'complete':sum(j['status']=='complete' for j in results),'total':len(results)}),flush=True)
-            time.sleep(30)
+            remaining=[end-time.monotonic() for d,end in getattr(b,'ablesci_wait_deadlines',{}).items()
+                       if d not in getattr(b,'ablesci_wait_expired',set()) and end>time.monotonic()]
+            time.sleep(min([30]+remaining))
             unresolved=[j['doi'] for j in results if j['doi'] in {doi_normalize(d) for d in dois}
                         and j['status'] not in ('complete','needs_ablesci')]
             if unresolved:results=run(b,unresolved,args.test_skip_find,args.test_force_gui_attach)

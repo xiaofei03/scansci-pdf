@@ -19,6 +19,12 @@ Request-detail pages need a real refresh on each bounded waiting poll; their old
 DOM can still say “waiting” after an upload has arrived. Refresh only request pages,
 never the active download page. Do not infer uploader delay from a stale snapshot.
 
+Uploader waiting is capped at 300 seconds per request per runner invocation, shared
+across all short polling rounds. Expiry checkpoints the existing request and points,
+skips further polls for that item, and exits partial when no other work remains.
+It never cancels a request, restarts its reward, or interrupts an active transfer.
+A later explicit resume may check the same request with a fresh bounded window.
+
 ## Transfer behavior
 
 - `/assist/download` is a transfer page, not necessarily a direct PDF response.
@@ -59,6 +65,9 @@ new requests are allowed. This is a website rule, not an HTTP/JSON error. When t
 user authorizes acceptance for the batch, validate first, accept the exact matching
 request, verify its accepted/completed status, then continue. Never use acceptance
 as a way to skip file verification. Without that authority, report the specific gate.
+This is not evidence that accounts below 500 cannot process a batch, or that higher
+balances permit unlimited simultaneous requests. Follow the actual create-page gate;
+do not hard-code eligibility from a guessed balance or assume the exact 500 boundary.
 
 Reward and high-speed costs share one cumulative budget. Default reward remains
 10, not the per-paper cap. Network failures are not presumed refunded. Resume the
